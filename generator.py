@@ -130,6 +130,158 @@ async def generate(task: TaskSpec) -> GenerationResult:
 
     # --- Phase 2: extract stage notes via a quick model call ---
 
+    notes = await _extract_stage_notes(task, artifact_dir, readme_text, scanned)
+
+    logger.info(
+        "stage notes: env=%d build=%d prep=%d run=%d",
+        len(notes["env_setup"]),
+        len(notes["build_artifact"]),
+        len(notes["benchmark_prep"]),
+        len(notes["experiment_runs"]),
+    )
+
+    # --- Phase 3: write policy files ---
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    claude_dir = artifact_dir / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+
+    settings_payload = {
+        "permissions": {
+            "allow": [
+                f"Write({output_dir.as_posix()}/**)",
+                "Write(.claude/**)",
+            ],
+            "deny": ["Write(**)"],
+        }
+    }
+    (claude_dir / "settings.json").write_text(
+        json.dumps(settings_payload, indent=2), encoding="utf-8"
+    )
+
+    claude_md_lines = [
+        "# Oracle Generator Context",
+        "",
+        f"Artifact root: {artifact_dir.as_posix()}",
+        f"Artifact README: {readme_path.as_posix()}",
+        f"HOWTO guide: {task.howto_path.as_posix()}",
+        f"Output directory: {output_dir.as_posix()}",
+        "",
+        "Only write files under _agent_eval/ and .claude/.",
+        "Do not modify artifact source files.",
+    ]
+    if task.example_oracle_dirs:
+        claude_md_lines.append("")
+        claude_md_lines.append("Example oracle directories:")
+        for ep in task.example_oracle_dirs:
+            claude_md_lines.append(f"- {ep.as_posix()}")
+    (claude_dir / "CLAUDE.md").write_text(
+        "\n".join(claude_md_lines) + "\n", encoding="utf-8"
+    )
+
+    # --- Phase 4: generate oracle files ---
+
+    prompt = _build_generation_prompt(task, artifact_dir, readme_path, output_dir, notes)
+
+    options = ClaudeAgentOptions(
+        tools={"type": "preset", "preset": "claude_code"},
+        system_prompt={
+            "type": "preset",
+            "preset": "claude_code",
+            "append": _SYSTEM_APPEND,
+        },
+        allowed_tools=["LS", "Read", "Grep", "Glob", "Write", "Edit", "MultiEdit", "Bash"],
+        disallowed_tools=["WebFetch", "Agent(Explore)", "Agent(Plan)"],
+        setting_sources=["project"],
+        permission_mode="default",
+        sandbox={
+            "enabled": True,
+            "autoAllowBashIfSandboxed": True,
+            "allowUnsandboxedCommands": False,
+        },
+        cwd=artifact_dir.as_posix(),
+        max_turns=task.max_turns,
+        model=task.model,
+        effort=task.effort,
+    )
+
+    transcript: list[str] = []
+    spent_usd = 0.0
+    attempts = 1
+
+    async with ClaudeSDKClient(options=options) as client:
+        await client.query(prompt)
+        text, cost = await _consume_response(client, verbose=task.verbose)
+        if text:
+            transcript.append(text)
+        if cost is not None:
+            spent_usd = cost
+            logger.info("session_cost_usd=%.4f", spent_usd)
+
+        missing, compile_errors, ok = _validate_oracle_outputs(output_dir)
+
+        repairs = 0
+        while not ok and repairs < task.max_repairs:
+            if task.max_budget_usd is not None and spent_usd >= task.max_budget_usd:
+                logger.warning(
+                    "budget limit reached spent_usd=%.4f limit_usd=%.4f",
+                    spent_usd,
+                    task.max_budget_usd,
+                )
+                transcript.append(
+                    f"Stopped because budget limit was reached: "
+                    f"spent=${spent_usd:.4f}, limit=${task.max_budget_usd:.4f}"
+                )
+                break
+            repairs += 1
+            attempts += 1
+            logger.info("starting repair attempt %d", repairs)
+
+            repair_lines = [
+                "The generated evaluator has issues. Patch only the files under _agent_eval/.",
+                "Do not modify artifact source files.",
+                "Preserve correct work.",
+                "",
+                "Issues found:",
+            ]
+            for fname in missing:
+                repair_lines.append(f"- missing required file: {fname}")
+            for err in compile_errors:
+                repair_lines.append(f"- compile error: {err}")
+            repair_lines.extend([
+                "",
+                "Keep following HOWTO.md conventions and the example oracle patterns.",
+                "If a referenced refs JSON file is missing and exact values are unknown,",
+                "create it with the expected schema and typed placeholders.",
+            ])
+
+            await client.query("\n".join(repair_lines))
+            text, cost = await _consume_response(client, verbose=task.verbose)
+            if text:
+                transcript.append(text)
+            if cost is not None:
+                spent_usd = cost
+                logger.info("session_cost_usd=%.4f after repair %d", spent_usd, repairs)
+
+            missing, compile_errors, ok = _validate_oracle_outputs(output_dir)
+
+    logger.info("generation finished ok=%s attempts=%d spent_usd=%.4f", ok, attempts, spent_usd)
+
+    return GenerationResult(
+        success=ok,
+        attempts=attempts,
+        transcript="\n\n".join(t for t in transcript if t),
+        spent_usd=spent_usd,
+    )
+
+
+async def _extract_stage_notes(
+    task: TaskSpec,
+    artifact_dir: Path,
+    readme_text: str,
+    scanned: dict[str, str],
+) -> dict[str, list[str]]:
     notes: dict[str, list[str]] = {
         "env_setup": [],
         "build_artifact": [],
@@ -137,7 +289,7 @@ async def generate(task: TaskSpec) -> GenerationResult:
         "experiment_runs": [],
     }
 
-    context_parts = [f"README ({readme_path.name}):\n{readme_text}"]
+    context_parts = [f"README ({task.artifact_readme.name}):\n{readme_text}"]
     for file_name, file_text in scanned.items():
         context_parts.append(f"{file_name}:\n{file_text}")
     combined_context = "\n\n---\n\n".join(context_parts)
@@ -185,57 +337,17 @@ async def generate(task: TaskSpec) -> GenerationResult:
     except Exception as exc:
         logger.warning("failed to parse stage notes response: %s", exc)
 
+    return notes
+
+
+def _build_generation_prompt(
+    task: TaskSpec,
+    artifact_dir: Path,
+    readme_path: Path,
+    output_dir: Path,
+    notes: dict[str, list[str]],
+) -> str:
     total_notes = sum(len(v) for v in notes.values())
-    logger.info(
-        "stage notes: env=%d build=%d prep=%d run=%d total=%d",
-        len(notes["env_setup"]),
-        len(notes["build_artifact"]),
-        len(notes["benchmark_prep"]),
-        len(notes["experiment_runs"]),
-        total_notes,
-    )
-
-    # --- Phase 3: write policy files ---
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    claude_dir = artifact_dir / ".claude"
-    claude_dir.mkdir(parents=True, exist_ok=True)
-
-    settings_payload = {
-        "permissions": {
-            "allow": [
-                f"Write({output_dir.as_posix()}/**)",
-                "Write(.claude/**)",
-            ],
-            "deny": ["Write(**)"],
-        }
-    }
-    (claude_dir / "settings.json").write_text(
-        json.dumps(settings_payload, indent=2), encoding="utf-8"
-    )
-
-    claude_md_lines = [
-        "# Oracle Generator Context",
-        "",
-        f"Artifact root: {artifact_dir.as_posix()}",
-        f"Artifact README: {readme_path.as_posix()}",
-        f"HOWTO guide: {task.howto_path.as_posix()}",
-        f"Output directory: {output_dir.as_posix()}",
-        "",
-        "Only write files under _agent_eval/ and .claude/.",
-        "Do not modify artifact source files.",
-    ]
-    if task.example_oracle_dirs:
-        claude_md_lines.append("")
-        claude_md_lines.append("Example oracle directories:")
-        for ep in task.example_oracle_dirs:
-            claude_md_lines.append(f"- {ep.as_posix()}")
-    (claude_dir / "CLAUDE.md").write_text(
-        "\n".join(claude_md_lines) + "\n", encoding="utf-8"
-    )
-
-    # --- Phase 4: generate oracle files ---
 
     prompt_lines = [
         "Create a complete ArtEvalBench evaluator for this artifact.",
@@ -315,121 +427,25 @@ async def generate(task: TaskSpec) -> GenerationResult:
         "- what files you created or updated",
     ])
 
-    prompt = "\n".join(prompt_lines)
+    return "\n".join(prompt_lines)
 
-    options = ClaudeAgentOptions(
-        tools={"type": "preset", "preset": "claude_code"},
-        system_prompt={
-            "type": "preset",
-            "preset": "claude_code",
-            "append": _SYSTEM_APPEND,
-        },
-        allowed_tools=["LS", "Read", "Grep", "Glob", "Write", "Edit", "MultiEdit", "Bash"],
-        disallowed_tools=["WebFetch", "Agent(Explore)", "Agent(Plan)"],
-        setting_sources=["project"],
-        permission_mode="default",
-        sandbox={
-            "enabled": True,
-            "autoAllowBashIfSandboxed": True,
-            "allowUnsandboxedCommands": False,
-        },
-        cwd=artifact_dir.as_posix(),
-        max_turns=task.max_turns,
-        model=task.model,
-        effort=task.effort,
-    )
 
-    transcript: list[str] = []
-    spent_usd = 0.0
-    attempts = 1
-
-    async with ClaudeSDKClient(options=options) as client:
-        await client.query(prompt)
-        text, cost = await _consume_response(client, verbose=task.verbose)
-        if text:
-            transcript.append(text)
-        if cost is not None:
-            spent_usd = cost
-            logger.info("session_cost_usd=%.4f", spent_usd)
-
-        # simple inline validation: check files exist and compile
-        missing = [f for f in _ORACLE_FILES if not (output_dir / f).is_file()]
-        compile_errors: list[str] = []
-        for fname in _ORACLE_FILES:
-            p = output_dir / fname
-            if p.is_file() and p.suffix == ".py":
-                result = subprocess.run(
-                    [sys.executable, "-m", "py_compile", str(p)],
-                    capture_output=True,
-                )
-                if result.returncode != 0:
-                    compile_errors.append(f"{fname}: {result.stderr.decode().strip()}")
-        ok = not missing and not compile_errors
-
-        repairs = 0
-        while not ok and repairs < task.max_repairs:
-            if task.max_budget_usd is not None and spent_usd >= task.max_budget_usd:
-                logger.warning(
-                    "budget limit reached spent_usd=%.4f limit_usd=%.4f",
-                    spent_usd,
-                    task.max_budget_usd,
-                )
-                transcript.append(
-                    f"Stopped because budget limit was reached: "
-                    f"spent=${spent_usd:.4f}, limit=${task.max_budget_usd:.4f}"
-                )
-                break
-            repairs += 1
-            attempts += 1
-            logger.info("starting repair attempt %d", repairs)
-
-            repair_lines = [
-                "The generated evaluator has issues. Patch only the files under _agent_eval/.",
-                "Do not modify artifact source files.",
-                "Preserve correct work.",
-                "",
-                "Issues found:",
-            ]
-            for fname in missing:
-                repair_lines.append(f"- missing required file: {fname}")
-            for err in compile_errors:
-                repair_lines.append(f"- compile error: {err}")
-            repair_lines.extend([
-                "",
-                "Keep following HOWTO.md conventions and the example oracle patterns.",
-                "If a referenced refs JSON file is missing and exact values are unknown,",
-                "create it with the expected schema and typed placeholders.",
-            ])
-
-            await client.query("\n".join(repair_lines))
-            text, cost = await _consume_response(client, verbose=task.verbose)
-            if text:
-                transcript.append(text)
-            if cost is not None:
-                spent_usd = cost
-                logger.info("session_cost_usd=%.4f after repair %d", spent_usd, repairs)
-
-            missing = [f for f in _ORACLE_FILES if not (output_dir / f).is_file()]
-            compile_errors = []
-            for fname in _ORACLE_FILES:
-                p = output_dir / fname
-                if p.is_file() and p.suffix == ".py":
-                    result = subprocess.run(
-                        [sys.executable, "-m", "py_compile", str(p)],
-                        capture_output=True,
-                    )
-                    if result.returncode != 0:
-                        compile_errors.append(f"{fname}: {result.stderr.decode().strip()}")
-            ok = not missing and not compile_errors
-
-    logger.info("generation finished ok=%s attempts=%d spent_usd=%.4f", ok, attempts, spent_usd)
-
-    return GenerationResult(
-        success=ok,
-        attempts=attempts,
-        transcript="\n\n".join(t for t in transcript if t),
-        spent_usd=spent_usd,
-    )
+def _validate_oracle_outputs(
+    output_dir: Path,
+) -> tuple[list[str], list[str], bool]:
+    missing = [f for f in _ORACLE_FILES if not (output_dir / f).is_file()]
+    compile_errors: list[str] = []
+    for fname in _ORACLE_FILES:
+        p = output_dir / fname
+        if p.is_file() and p.suffix == ".py":
+            result = subprocess.run(
+                [sys.executable, "-m", "py_compile", str(p)],
+                capture_output=True,
+            )
+            if result.returncode != 0:
+                compile_errors.append(f"{fname}: {result.stderr.decode().strip()}")
+    ok = not missing and not compile_errors
+    return missing, compile_errors, ok
 
 
 async def _consume_response(
