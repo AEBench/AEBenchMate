@@ -1,87 +1,47 @@
-#!/usr/bin/env python3
 from __future__ import annotations
 
 import asyncio
-import json
-import re
-import subprocess
-import sys
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from claude_agent_sdk import (
-    AssistantMessage,
-    ClaudeAgentOptions,
-    ClaudeSDKClient,
-    ResultMessage,
-    TextBlock,
+from claude_agent_sdk import ClaudeSDKClient
+
+from policies import generator_options, write_policy_files
+from utils import (
+    EvalSpec,
+    read_feedback_text,
+    read_json_if_exists,
+    read_response,
 )
 
-from utils import get_logger
-
-
-logger = get_logger("generator")
-
-
-_SYSTEM_APPEND = """
-You are an expert Python engineer generating benchmark-specific oracle code.
-
-Hard rules:
-- Only write under _agent_eval/ and .claude/
-- Do not modify artifact source files
-- Generate _agent_eval/main.py and the four oracle modules
-- Keep every oracle non-interactive, idempotent, and time-bounded
-- Read HOWTO.md first, then the example oracle directories, then the artifact README
-- Follow HOWTO.md conventions first
-- Reuse patterns from the example oracle directories where appropriate
-- Prefer evaluator base classes and primitives already present in the evaluator framework
-- When exact refs values are unknown, create typed placeholders in refs JSON files
-- Use 0.0 for floats, 0 for ints, empty strings for strings, false for booleans, [] for lists, and {} for objects
-- Before finishing, run python -m py_compile on _agent_eval/*.py
-""".strip()
-
-
-_KEY_CONFIG_FILES = [
-    "Makefile",
-    "makefile",
-    "requirements.txt",
-    "requirements-dev.txt",
-    "setup.py",
-    "setup.cfg",
-    "pyproject.toml",
-    "environment.yml",
-    "environment.yaml",
-    "Dockerfile",
-    "docker-compose.yml",
-    "docker-compose.yaml",
-    "CMakeLists.txt",
-    "go.mod",
-    "pom.xml",
-]
-
-_ORACLE_FILES = [
-    "main.py",
-    "oracle_env_setup.py",
-    "oracle_build_install.py",
-    "oracle_prep_benchmark.py",
-    "oracle_run_experiments.py",
-]
+logger = logging.getLogger("generator")
 
 
 @dataclass(frozen=True)
-class TaskSpec:
-    artifact_dir: Path
-    artifact_readme: Path
-    howto_path: Path
-    example_oracle_dirs: tuple[Path, ...] = ()
-    output_dir_name: str = "_agent_eval"
-    max_turns: int = 80
-    max_repairs: int = 2
-    max_budget_usd: float = 1.0
-    model: str | None = None
-    effort: str | None = "medium"
-    verbose: bool = False
+class ArtifactPlan:
+    artifact_plan_path: Path | None
+    artifact_name: str
+    source_file: str
+    summary: str
+    env_setup: tuple[dict[str, Any], ...]
+    build_artifact: tuple[dict[str, Any], ...]
+    benchmark_prep: tuple[dict[str, Any], ...]
+    experiment_runs: tuple[dict[str, Any], ...]
+
+    @classmethod
+    def empty(cls) -> "ArtifactPlan":
+        return cls(
+            artifact_plan_path=None,
+            artifact_name="",
+            source_file="",
+            summary="",
+            env_setup=(),
+            build_artifact=(),
+            benchmark_prep=(),
+            experiment_runs=(),
+        )
 
 
 @dataclass(frozen=True)
@@ -89,379 +49,289 @@ class GenerationResult:
     success: bool
     attempts: int
     transcript: str
-    spent_usd: float | None = None
+    cost_usd: float | None = None
 
 
-def run(task: TaskSpec) -> GenerationResult:
-    return asyncio.run(generate(task))
+def run(spec: EvalSpec) -> GenerationResult:
+    return asyncio.run(generate(spec))
 
 
-async def generate(task: TaskSpec) -> GenerationResult:
-    artifact_dir = task.artifact_dir.resolve()
-    readme_path = task.artifact_readme.resolve()
-    output_dir = artifact_dir / task.output_dir_name
+async def generate(spec: EvalSpec) -> GenerationResult:
+    spec = spec.resolved()
 
-    # --- Phase 1: read README and scan a handful of key config files ---
+    if spec.artifact_readme is None:
+        raise ValueError("artifact_readme is required for generator")
+    if spec.howto_path is None:
+        raise ValueError("howto_path is required for generator")
 
-    readme_text = readme_path.read_text(encoding="utf-8")
-
-    scanned: dict[str, str] = {}
-    for name in _KEY_CONFIG_FILES:
-        p = artifact_dir / name
-        if p.is_file() and p.stat().st_size < 65536:
-            try:
-                scanned[name] = p.read_text(encoding="utf-8")
-            except Exception:
-                pass
-
-    # also pick up shell scripts at the repo root
-    for p in sorted(artifact_dir.iterdir()):
-        if p.is_file() and p.suffix in {".sh", ".bash"} and p.stat().st_size < 65536:
-            try:
-                scanned[p.name] = p.read_text(encoding="utf-8")
-            except Exception:
-                pass
+    artifact_plan = _load_artifact_plan(spec.artifact_plan_path)
+    feedback_text = read_feedback_text(spec.feedback_path)
+    output_dir = spec.output_dir
 
     logger.info(
-        "scanning artifact: readme_chars=%d extra_files=%d",
-        len(readme_text),
-        len(scanned),
+        "starting generation artifact_id=%s plan_steps=%d",
+        spec.artifact_id,
+        _count_plan_steps(artifact_plan),
     )
 
-    # --- Phase 2: extract stage notes via a quick model call ---
-
-    notes = await _extract_stage_notes(task, artifact_dir, readme_text, scanned)
-
-    logger.info(
-        "stage notes: env=%d build=%d prep=%d run=%d",
-        len(notes["env_setup"]),
-        len(notes["build_artifact"]),
-        len(notes["benchmark_prep"]),
-        len(notes["experiment_runs"]),
+    write_policy_files(
+        artifact_dir=spec.artifact_dir,
+        output_dir=output_dir,
+        artifact_readme=spec.artifact_readme,
+        howto_path=spec.howto_path,
+        artifact_plan_path=artifact_plan.artifact_plan_path,
+        primitives_dir=spec.primitives_dir,
+        examples_dir=spec.examples_dir,
+        output_base_dir=spec.output_base_dir,
     )
 
-    # --- Phase 3: write policy files ---
+    if spec.over_budget:
+        logger.warning(
+            "budget exhausted before generation cost_usd=%.4f limit=%.4f",
+            spec.cost_usd,
+            spec.max_budget_usd,
+        )
+        return GenerationResult(
+            success=False,
+            attempts=0,
+            transcript=(
+                f"Stopped before generation: budget exhausted "
+                f"cost=${spec.cost_usd:.4f} limit=${spec.max_budget_usd:.4f}"
+            ),
+            cost_usd=spec.cost_usd,
+        )
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    claude_dir = artifact_dir / ".claude"
-    claude_dir.mkdir(parents=True, exist_ok=True)
-
-    settings_payload = {
-        "permissions": {
-            "allow": [
-                f"Write({output_dir.as_posix()}/**)",
-                "Write(.claude/**)",
-            ],
-            "deny": ["Write(**)"],
-        }
-    }
-    (claude_dir / "settings.json").write_text(
-        json.dumps(settings_payload, indent=2), encoding="utf-8"
-    )
-
-    claude_md_lines = [
-        "# Oracle Generator Context",
-        "",
-        f"Artifact root: {artifact_dir.as_posix()}",
-        f"Artifact README: {readme_path.as_posix()}",
-        f"HOWTO guide: {task.howto_path.as_posix()}",
-        f"Output directory: {output_dir.as_posix()}",
-        "",
-        "Only write files under _agent_eval/ and .claude/.",
-        "Do not modify artifact source files.",
-    ]
-    if task.example_oracle_dirs:
-        claude_md_lines.append("")
-        claude_md_lines.append("Example oracle directories:")
-        for ep in task.example_oracle_dirs:
-            claude_md_lines.append(f"- {ep.as_posix()}")
-    (claude_dir / "CLAUDE.md").write_text(
-        "\n".join(claude_md_lines) + "\n", encoding="utf-8"
-    )
-
-    # --- Phase 4: generate oracle files ---
-
-    prompt = _build_generation_prompt(task, artifact_dir, readme_path, output_dir, notes)
-
-    options = ClaudeAgentOptions(
-        tools={"type": "preset", "preset": "claude_code"},
-        system_prompt={
-            "type": "preset",
-            "preset": "claude_code",
-            "append": _SYSTEM_APPEND,
-        },
-        allowed_tools=["LS", "Read", "Grep", "Glob", "Write", "Edit", "MultiEdit", "Bash"],
-        disallowed_tools=["WebFetch", "Agent(Explore)", "Agent(Plan)"],
-        setting_sources=["project"],
-        permission_mode="default",
-        sandbox={
-            "enabled": True,
-            "autoAllowBashIfSandboxed": True,
-            "allowUnsandboxedCommands": False,
-        },
-        cwd=artifact_dir.as_posix(),
-        max_turns=task.max_turns,
-        model=task.model,
-        effort=task.effort,
-    )
-
-    transcript: list[str] = []
-    spent_usd = 0.0
-    attempts = 1
+    options = generator_options(spec, output_dir, output_base_dir=spec.output_base_dir)
+    transcript_parts: list[str] = []
 
     async with ClaudeSDKClient(options=options) as client:
-        await client.query(prompt)
-        text, cost = await _consume_response(client, verbose=task.verbose)
+        initial_prompt = _build_prompt(spec, artifact_plan, feedback_text)
+
+        logger.info(
+            "generator prompt size: chars=%d bytes=%d",
+            len(initial_prompt),
+            len(initial_prompt.encode("utf-8")),
+        )
+
+        await client.query(initial_prompt)
+        text, cost_usd = await read_response(client, logger=logger, verbose=spec.verbose)
+
         if text:
-            transcript.append(text)
-        if cost is not None:
-            spent_usd = cost
-            logger.info("session_cost_usd=%.4f", spent_usd)
+            transcript_parts.append(text)
 
-        missing, compile_errors, ok = _validate_oracle_outputs(output_dir)
+        spec.add_cost(cost_usd)
+        logger.info("session_cost_usd=%.6f accumulated=%.6f", cost_usd or 0, spec.cost_usd)
 
-        repairs = 0
-        while not ok and repairs < task.max_repairs:
-            if task.max_budget_usd is not None and spent_usd >= task.max_budget_usd:
-                logger.warning(
-                    "budget limit reached spent_usd=%.4f limit_usd=%.4f",
-                    spent_usd,
-                    task.max_budget_usd,
-                )
-                transcript.append(
-                    f"Stopped because budget limit was reached: "
-                    f"spent=${spent_usd:.4f}, limit=${task.max_budget_usd:.4f}"
-                )
-                break
-            repairs += 1
-            attempts += 1
-            logger.info("starting repair attempt %d", repairs)
-
-            repair_lines = [
-                "The generated evaluator has issues. Patch only the files under _agent_eval/.",
-                "Do not modify artifact source files.",
-                "Preserve correct work.",
-                "",
-                "Issues found:",
-            ]
-            for fname in missing:
-                repair_lines.append(f"- missing required file: {fname}")
-            for err in compile_errors:
-                repair_lines.append(f"- compile error: {err}")
-            repair_lines.extend([
-                "",
-                "Keep following HOWTO.md conventions and the example oracle patterns.",
-                "If a referenced refs JSON file is missing and exact values are unknown,",
-                "create it with the expected schema and typed placeholders.",
-            ])
-
-            await client.query("\n".join(repair_lines))
-            text, cost = await _consume_response(client, verbose=task.verbose)
-            if text:
-                transcript.append(text)
-            if cost is not None:
-                spent_usd = cost
-                logger.info("session_cost_usd=%.4f after repair %d", spent_usd, repairs)
-
-            missing, compile_errors, ok = _validate_oracle_outputs(output_dir)
-
-    logger.info("generation finished ok=%s attempts=%d spent_usd=%.4f", ok, attempts, spent_usd)
+    generation_ok = not spec.over_budget
 
     return GenerationResult(
-        success=ok,
-        attempts=attempts,
-        transcript="\n\n".join(t for t in transcript if t),
-        spent_usd=spent_usd,
+        success=generation_ok,
+        attempts=1,
+        transcript="\n\n".join(transcript_parts),
+        cost_usd=spec.cost_usd,
     )
 
 
-async def _extract_stage_notes(
-    task: TaskSpec,
-    artifact_dir: Path,
-    readme_text: str,
-    scanned: dict[str, str],
-) -> dict[str, list[str]]:
-    notes: dict[str, list[str]] = {
-        "env_setup": [],
-        "build_artifact": [],
-        "benchmark_prep": [],
-        "experiment_runs": [],
-    }
+def _load_artifact_plan(path: Path | None) -> ArtifactPlan:
+    if path is None:
+        return ArtifactPlan.empty()
 
-    context_parts = [f"README ({task.artifact_readme.name}):\n{readme_text}"]
-    for file_name, file_text in scanned.items():
-        context_parts.append(f"{file_name}:\n{file_text}")
-    combined_context = "\n\n---\n\n".join(context_parts)
+    payload = read_json_if_exists(path)
+    if payload is None or not isinstance(payload, dict):
+        if payload is not None:
+            logger.warning("artifact plan %s is not a JSON object", path)
+        return ArtifactPlan.empty()
 
-    extraction_prompt = (
-        "Extract stage notes from the following artifact repository files.\n\n"
-        "Return a JSON object with exactly these four keys: "
-        "env_setup, build_artifact, benchmark_prep, experiment_runs.\n"
-        "Each key maps to a list of short note strings.\n"
-        "Notes should be terse, factual, and grounded only in the provided text.\n"
-        "Do not invent facts not present in the files.\n"
-        "If a stage has no relevant information, return an empty list for it.\n"
-        "Return only the JSON object with no markdown fences.\n\n"
-        f"{combined_context}\n"
+    stages = payload.get("stages", {})
+    if not isinstance(stages, dict):
+        stages = {}
+
+    return ArtifactPlan(
+        artifact_plan_path=path,
+        artifact_name=str(payload.get("artifact_name", "")),
+        source_file=str(payload.get("source_file", "")),
+        summary=str(payload.get("summary", "")),
+        env_setup=_load_stage_items(stages, "env_setup"),
+        build_artifact=_load_stage_items(stages, "build_artifact"),
+        benchmark_prep=_load_stage_items(stages, "benchmark_prep"),
+        experiment_runs=_load_stage_items(stages, "experiment_runs"),
     )
 
-    extraction_options = ClaudeAgentOptions(
-        tools={"type": "preset", "preset": "claude_code"},
-        system_prompt={"type": "preset", "preset": "claude_code"},
-        disallowed_tools=["Bash", "Edit", "Write", "MultiEdit", "WebFetch"],
-        setting_sources=[],
-        permission_mode="default",
-        cwd=artifact_dir.as_posix(),
-        max_turns=4,
-        model=task.model,
-        effort="low",
+
+def _load_stage_items(
+    stages: dict[str, Any],
+    stage_name: str,
+) -> tuple[dict[str, Any], ...]:
+    value = stages.get(stage_name, [])
+    if not isinstance(value, list):
+        return ()
+    return tuple(item for item in value if isinstance(item, dict))
+
+
+def _count_plan_steps(bundle: ArtifactPlan) -> int:
+    return (
+        len(bundle.env_setup)
+        + len(bundle.build_artifact)
+        + len(bundle.benchmark_prep)
+        + len(bundle.experiment_runs)
     )
 
-    async with ClaudeSDKClient(options=extraction_options) as extraction_client:
-        await extraction_client.query(extraction_prompt)
-        extraction_text, _ = await _consume_response(extraction_client, verbose=False)
 
-    try:
-        cleaned = extraction_text.strip()
-        if cleaned.startswith("```"):
-            cleaned = re.sub(r"^```[a-zA-Z0-9_-]*\n", "", cleaned)
-            cleaned = re.sub(r"\n```$", "", cleaned)
-            cleaned = cleaned.strip()
-        raw_notes = json.loads(cleaned)
-        if isinstance(raw_notes, dict):
-            for stage in notes:
-                stage_val = raw_notes.get(stage, [])
-                if isinstance(stage_val, list):
-                    notes[stage] = [str(n).strip() for n in stage_val if n]
-    except Exception as exc:
-        logger.warning("failed to parse stage notes response: %s", exc)
-
-    return notes
-
-
-def _build_generation_prompt(
-    task: TaskSpec,
-    artifact_dir: Path,
-    readme_path: Path,
-    output_dir: Path,
-    notes: dict[str, list[str]],
+def _build_prompt(
+    spec: EvalSpec,
+    artifact_plan: ArtifactPlan,
+    feedback_text: str | None,
 ) -> str:
-    total_notes = sum(len(v) for v in notes.values())
+    howto_dir = spec.howto_path
+    instructions_path = howto_dir / "add_case.md"
+    building_blocks_path = spec.primitives_dir or howto_dir / "oracle_building_blocks"
+    examples_path = spec.examples_dir or howto_dir / "oracle_examples"
 
-    prompt_lines = [
+    lines = [
         "Create a complete ArtEvalBench evaluator for this artifact.",
         "",
-        f"Artifact root: {artifact_dir.as_posix()}",
-        f"Artifact README: {readme_path.as_posix()}",
-        f"HOWTO guide: {task.howto_path.as_posix()}",
-        f"Output directory: {output_dir.as_posix()}",
-        "",
-        "You must follow this workflow exactly:",
-        "1. Read HOWTO.md first.",
-        "2. Read the example oracle directories next.",
+        f"Artifact root: {spec.artifact_dir.as_posix()}",
+        f"Artifact README: {spec.artifact_readme.as_posix()}",
+        f"HOWTO guide directory: {howto_dir.as_posix()}",
+        f"Instructions and guide file: {instructions_path.as_posix()}",
+        f"Oracle building blocks: {building_blocks_path.as_posix()}",
+        f"Oracle examples: {examples_path.as_posix()}",
     ]
 
-    if total_notes > 0:
-        prompt_lines.extend([
-            "3. Read the stage notes below.",
-            "4. Use the stage notes as the primary source of artifact requirements.",
-            "5. Read the artifact README only after that, as fallback augmentation.",
-            "6. Write _agent_eval/oracle_plan.json before or alongside code generation.",
-            "7. Generate the artifact-specific evaluator files.",
-            "8. Run python -m py_compile on _agent_eval/*.py as a self-check.",
+    if artifact_plan.artifact_plan_path is not None:
+        lines.append(f"Artifact evaluation plan: {artifact_plan.artifact_plan_path.as_posix()}")
+
+    lines.extend([
+        "",
+        "Hard constraint: do not inspect artifact source-code files unless a specific planned step cannot be resolved from artifact_plan.json, README, configuration, scripts/script-like, or infrastructure-related files.",
+        "You must follow this workflow exactly:",
+        "1. Read INSTRUCTIONS.md in the HOWTO directory first.",
+        "2. Read oracle_building_blocks/ next and reuse those building blocks whenever possible.",
+        "3. Read oracle_examples/ next and reuse their structure and patterns when appropriate.",
+    ])
+
+    if _count_plan_steps(artifact_plan) > 0:
+        lines.extend([
+            "4. Read the artifact evaluation plan and the compact plan summary below.",
+            "5. Use the artifact plan as the primary structured checklist.",
+            "6. Read the artifact README only after that, as fallback augmentation.",
+            "7. Do not proactively inspect artifact source code trees; only inspect named non-source files or paths when needed to confirm a planned step.",
+            "8. Write _agent_eval/oracle_plan.json before or alongside code generation.",
+            "9. Generate the artifact-specific evaluator files.",
+            "10. Run a lightweight self-check: python -m py_compile _agent_eval/env_setup.py _agent_eval/artifact_build.py _agent_eval/benchmark_prep.py _agent_eval/experiment_runs.py.",
         ])
     else:
-        prompt_lines.extend([
-            "3. Read the artifact README after that.",
-            "4. Write _agent_eval/oracle_plan.json before or alongside code generation.",
-            "5. Generate the artifact-specific evaluator files.",
-            "6. Run python -m py_compile on _agent_eval/*.py as a self-check.",
+        lines.extend([
+            "4. Read the artifact README after that.",
+            "5. Do not proactively inspect artifact source code trees; only inspect named non-source files or paths when needed to confirm a planned step.",
+            "6. Write _agent_eval/oracle_plan.json before or alongside code generation.",
+            "7. Generate the artifact-specific evaluator files.",
+            "8. Run a lightweight self-check: python -m py_compile _agent_eval/env_setup.py _agent_eval/artifact_build.py _agent_eval/benchmark_prep.py _agent_eval/experiment_runs.py.",
         ])
 
-    prompt_lines.extend([
+    lines.extend([
         "",
-        "Required outputs:",
-        "- _agent_eval/main.py",
-        "- _agent_eval/oracle_env_setup.py",
-        "- _agent_eval/oracle_build_install.py",
-        "- _agent_eval/oracle_prep_benchmark.py",
-        "- _agent_eval/oracle_run_experiments.py",
+        "Required outputs (AEBench oracle layout):",
+        "- _agent_eval/env_setup.py        (class OracleEnvSetup(CaseOracleEnvSetupBase))",
+        "- _agent_eval/artifact_build.py   (class OracleArtifactBuild(CaseOracleArtifactBuildBase))",
+        "- _agent_eval/benchmark_prep.py   (class OracleBenchmarkPrep(CaseOracleBenchmarkPrepBase))",
+        "- _agent_eval/experiment_runs.py  (class OracleExperimentRuns(CaseOracleExperimentRunsBase))",
+        "- _agent_eval/common.py           (shared helpers — not a phase class)",
         "- _agent_eval/oracle_plan.json",
         "- _agent_eval/refs/*.json only when the checks actually need them",
         "",
-        "oracle_plan.json must include: howto_rules, example_patterns, "
-        "borrowed_structure, artifact_specific_adaptations, assumptions, "
-        "reference_templates.",
+        "oracle_plan.json must include:",
+        "- howto_rules",
+        "- example_patterns",
+        "- borrowed_structure",
+        "- artifact_specific_adaptations",
+        "- reference_templates",
+        "- plan_summary",
+        "- step_coverage",
+        "- step_gaps",
+        "- step_augmentations",
         "",
         "Implementation rules:",
-        "- Follow HOWTO.md conventions first.",
-        "- Reuse patterns from the examples where appropriate.",
-        "- Only use the artifact README or repository to resolve ambiguity.",
+        "- Follow INSTRUCTIONS.md conventions first.",
+        "- Reuse code patterns from oracle_building_blocks/ whenever possible.",
+        "- Reuse structure and style from oracle_examples/ where appropriate.",
+        "- Use the artifact evaluation plan as the primary source of artifact requirements when it is available.",
+        "- For every important oracle check, prefer to map it to one or more planned steps from the artifact plan.",
+        "- Use the artifact README as fallback only.",
+        "- Do not proactively inspect artifact source code trees.",
         "- Keep checks objective, non-interactive, idempotent, and time-bounded.",
+        "- Any use of subprocess.run, subprocess.check_call, or subprocess.check_output must include an explicit timeout=... argument.",
         "- Do not modify artifact source files.",
         "- Keep writes inside _agent_eval/ only.",
-        "- Use refs JSON files only when they are referenced by the checks.",
         "",
     ])
 
-    if task.example_oracle_dirs:
-        prompt_lines.append("Example oracle directories:")
-        for ep in task.example_oracle_dirs:
-            prompt_lines.append(f"- {ep.as_posix()}")
-        prompt_lines.append("")
+    if _count_plan_steps(artifact_plan) > 0:
+        lines.append("Artifact evaluation plan summary:")
+        lines.append(_summarize_artifact_plan(artifact_plan))
+        lines.append("")
 
-    if total_notes > 0:
-        prompt_lines.append("Stage notes extracted from artifact files:")
-        for stage_name, stage_notes in notes.items():
-            label = stage_name.replace("_", " ").title()
-            prompt_lines.append(f"  {label} ({len(stage_notes)} note(s)):")
-            for note in stage_notes:
-                prompt_lines.append(f"    - {note}")
-        prompt_lines.append("")
+    if feedback_text:
+        lines.append("Previous validation feedback (fix these issues):")
+        lines.append(feedback_text)
+        lines.append("")
 
-    prompt_lines.extend([
+    lines.extend([
+        "Before finishing:",
+        "- verify that all referenced refs JSON files exist",
+        "- ensure imports, file names, and class names match AEBench oracle conventions",
+        "- ensure oracle_plan.json records step_coverage, step_gaps, and step_augmentations",
+        "",
         "Reply with a short summary of:",
-        "- what patterns you reused from HOWTO.md",
+        "- what patterns you reused from HOWTO",
         "- what patterns you reused from the examples",
+        "- how you used the artifact evaluation plan",
         "- what files you created or updated",
     ])
 
-    return "\n".join(prompt_lines)
+    return "\n".join(lines)
 
 
-def _validate_oracle_outputs(
-    output_dir: Path,
-) -> tuple[list[str], list[str], bool]:
-    missing = [f for f in _ORACLE_FILES if not (output_dir / f).is_file()]
-    compile_errors: list[str] = []
-    for fname in _ORACLE_FILES:
-        p = output_dir / fname
-        if p.is_file() and p.suffix == ".py":
-            result = subprocess.run(
-                [sys.executable, "-m", "py_compile", str(p)],
-                capture_output=True,
-            )
-            if result.returncode != 0:
-                compile_errors.append(f"{fname}: {result.stderr.decode().strip()}")
-    ok = not missing and not compile_errors
-    return missing, compile_errors, ok
+def _summarize_artifact_plan(bundle: ArtifactPlan) -> str:
+    lines: list[str] = []
 
+    if bundle.artifact_plan_path is not None:
+        lines.append(f"Use artifact plan from: {bundle.artifact_plan_path.as_posix()}")
+    if bundle.artifact_name:
+        lines.append(f"Artifact name: {bundle.artifact_name}")
+    if bundle.summary:
+        lines.append(f"Plan summary: {bundle.summary}")
+    if lines:
+        lines.append("")
 
-async def _consume_response(
-    client: ClaudeSDKClient,
-    verbose: bool = False,
-) -> tuple[str, float | None]:
-    chunks: list[str] = []
-    total_cost_usd: float | None = None
-    async for message in client.receive_response():
-        if isinstance(message, AssistantMessage):
-            for block in message.content:
-                if isinstance(block, TextBlock):
-                    chunks.append(block.text)
-                    if verbose and block.text:
-                        for line in block.text.splitlines():
-                            logger.info("[assistant] %s", line)
-        elif isinstance(message, ResultMessage):
-            total_cost_usd = message.total_cost_usd
-    return "\n".join(chunks).strip(), total_cost_usd
+    for title, steps in [
+        ("Environment setup steps", bundle.env_setup),
+        ("Build artifact steps", bundle.build_artifact),
+        ("Benchmark prep steps", bundle.benchmark_prep),
+        ("Experiment run steps", bundle.experiment_runs),
+    ]:
+        lines.append(f"{title} ({len(steps)} steps):")
+        shown = 0
+        for step in steps:
+            if shown >= 15:
+                break
+            item_id = str(step.get("item_id", ""))
+            kind = str(step.get("kind", ""))
+            name = str(step.get("name", ""))
+            requirement = str(step.get("requirement", ""))
+            command = str(step.get("command", ""))
+            parts = [f"{kind}: {name}"]
+            if requirement:
+                parts.append(f"requirement={requirement}")
+            if command:
+                parts.append(f"command={command}")
+            detail = " | ".join(parts)
+            line = f"  [{item_id}] {detail}" if item_id else f"  {detail}"
+            lines.append(line)
+            shown += 1
+        remaining = len(steps) - shown
+        if remaining > 0:
+            lines.append(f"  ... {remaining} additional steps available")
+        lines.append("")
+
+    return "\n".join(lines).strip()
