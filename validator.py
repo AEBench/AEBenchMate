@@ -31,14 +31,15 @@ class ValidationIssue:
     path: str
     message: str
 
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "path", str(self.path))
-
 
 @dataclass(frozen=True)
 class ValidationReport:
     ok: bool
     issues: tuple[ValidationIssue, ...]
+
+
+def _issue(code: str, severity: str, path: Path | str, message: str) -> ValidationIssue:
+    return ValidationIssue(code=code, severity=severity, path=str(path), message=message)
 
 
 def validate(root: Path) -> ValidationReport:
@@ -48,11 +49,11 @@ def validate(root: Path) -> ValidationReport:
     for name in REQUIRED_ORACLE_FILES:
         p = root / AGENT_EVAL / name
         if not p.exists():
-            issues.append(ValidationIssue("missing_file", "error", p, "required file missing"))
+            issues.append(_issue("missing_file", "error", p, "required file missing"))
 
     plan_path = root / AGENT_EVAL / "oracle_plan.json"
     if not plan_path.exists():
-        issues.append(ValidationIssue("missing_plan", "warning", plan_path, "oracle_plan.json missing"))
+        issues.append(_issue("missing_plan", "warning", plan_path, "oracle_plan.json missing"))
 
     eval_dir = root / AGENT_EVAL
     if eval_dir.is_dir():
@@ -97,20 +98,20 @@ def _check_python_file(path: Path) -> list[ValidationIssue]:
     try:
         py_compile.compile(str(path), doraise=True)
     except Exception as exc:
-        return [ValidationIssue("compile_error", "error", path, str(exc))]
+        return [_issue("compile_error", "error", path, str(exc))]
 
     try:
         source = path.read_text("utf-8")
         tree = ast.parse(source, filename=str(path))
     except Exception as exc:
-        return [ValidationIssue("ast_error", "error", path, str(exc))]
+        return [_issue("ast_error", "error", path, str(exc))]
 
     expected_class = REQUIRED_ORACLE_FILES.get(path.name)
     if expected_class:
         class_names = {n.name for n in ast.walk(tree) if isinstance(n, ast.ClassDef)}
         if expected_class not in class_names:
             issues.append(
-                ValidationIssue("missing_class", "error", path, f"expected class {expected_class} not found")
+                _issue("missing_class", "error", path, f"expected class {expected_class} not found")
             )
 
     for node in ast.walk(tree):
@@ -119,15 +120,15 @@ def _check_python_file(path: Path) -> list[ValidationIssue]:
         name = _get_call_name(node.func)
         short = name.split(".")[-1]
         if name in FORBIDDEN_CALLS or short in FORBIDDEN_CALLS:
-            issues.append(ValidationIssue("forbidden_call", "error", path, f"forbidden call: {name}"))
+            issues.append(_issue("forbidden_call", "error", path, f"forbidden call: {name}"))
         if name in {"subprocess.Popen", "Popen"} or short == "Popen":
-            issues.append(ValidationIssue("forbidden_popen", "error", path, "Popen not allowed"))
+            issues.append(_issue("forbidden_popen", "error", path, "Popen not allowed"))
 
     for pattern in (r"/home/[^/]+", r"/Users/[^/]+"):
         m = re.search(pattern, source)
         if m:
             issues.append(
-                ValidationIssue("hardcoded_path", "warning", path, f"hardcoded path: {m.group(0)}")
+                _issue("hardcoded_path", "warning", path, f"hardcoded path: {m.group(0)}")
             )
 
     return issues
@@ -141,10 +142,10 @@ def _check_oracle_plan(root: Path) -> list[ValidationIssue]:
     try:
         payload = read_json_if_exists(path)
     except Exception as exc:
-        return [ValidationIssue("invalid_oracle_plan_json", "warning", path, str(exc))]
+        return [_issue("invalid_oracle_plan_json", "warning", path, str(exc))]
 
     if not isinstance(payload, dict):
-        return [ValidationIssue("oracle_plan_not_object", "warning", path, "should be a JSON object")] if payload is not None else []
+        return [_issue("oracle_plan_not_object", "warning", path, "should be a JSON object")] if payload is not None else []
 
     issues: list[ValidationIssue] = []
     for key in (
@@ -159,12 +160,12 @@ def _check_oracle_plan(root: Path) -> list[ValidationIssue]:
         "step_augmentations",
     ):
         if key not in payload:
-            issues.append(ValidationIssue("oracle_plan_key_missing", "warning", path, f"missing key {key!r}"))
+            issues.append(_issue("oracle_plan_key_missing", "warning", path, f"missing key {key!r}"))
 
     templates = payload.get("reference_templates")
     if templates is not None and not isinstance(templates, dict):
         issues.append(
-            ValidationIssue("oracle_plan_templates_type", "warning", path, "reference_templates should be a dict")
+            _issue("oracle_plan_templates_type", "warning", path, "reference_templates should be a dict")
         )
 
     return issues
@@ -174,14 +175,14 @@ def _check_ref_files(root: Path) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
     for ref_path in _extract_ref_paths(root):
         if not ref_path.exists():
-            issues.append(ValidationIssue("missing_ref", "error", ref_path, "referenced ref file missing"))
+            issues.append(_issue("missing_ref", "error", ref_path, "referenced ref file missing"))
             continue
         try:
             data = read_json_if_exists(ref_path)
             if data is None:
-                issues.append(ValidationIssue("missing_ref", "error", ref_path, "ref file is empty"))
+                issues.append(_issue("missing_ref", "error", ref_path, "ref file is empty"))
         except Exception as exc:
-            issues.append(ValidationIssue("invalid_ref_json", "error", ref_path, str(exc)))
+            issues.append(_issue("invalid_ref_json", "error", ref_path, str(exc)))
     return issues
 
 
@@ -192,6 +193,14 @@ def _get_call_name(node: ast.AST) -> str:
         base = _get_call_name(node.value)
         return f"{base}.{node.attr}" if base else node.attr
     return ""
+
+
+def _collect_string_literals(node: ast.AST) -> list[str]:
+    return [
+        item.value
+        for item in ast.walk(node)
+        if isinstance(item, ast.Constant) and isinstance(item.value, str)
+    ]
 
 
 def _extract_ref_paths(root: Path) -> list[Path]:
@@ -213,11 +222,7 @@ def _extract_ref_paths(root: Path) -> list[Path]:
             if kw.arg != "ground_truth_paths" or not isinstance(kw.value, ast.Dict):
                 continue
             for val in kw.value.values:
-                parts = [
-                    item.value
-                    for item in ast.walk(val)
-                    if isinstance(item, ast.Constant) and isinstance(item.value, str)
-                ]
+                parts = _collect_string_literals(val)
                 if "refs" in parts:
                     for p in parts:
                         if p.endswith(".json"):

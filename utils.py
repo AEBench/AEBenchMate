@@ -75,24 +75,16 @@ class EvalSpec:
         base = self.output_base_dir if self.output_base_dir is not None else self.artifact_dir
         return base / "artifact_plan.json"
 
-    @property
-    def over_budget(self) -> bool:
-        return self.cost_usd >= self.max_budget_usd
 
-    def add_cost(self, reported_cost_usd: float | None) -> float:
-        if reported_cost_usd is None:
-            return self.cost_usd
-        self.cost_usd += reported_cost_usd
-        return self.cost_usd
+def budget_exhausted(spec: EvalSpec) -> bool:
+    return spec.cost_usd >= spec.max_budget_usd
 
 
-def read_feedback_text(feedback_path: Path | None) -> str | None:
-    if feedback_path is None:
-        return None
-    text = read_text_if_exists(feedback_path)
-    if text is None:
-        return None
-    return text.strip() or None
+def add_cost(spec: EvalSpec, reported_cost_usd: float | None) -> float:
+    if reported_cost_usd is None:
+        return spec.cost_usd
+    spec.cost_usd += reported_cost_usd
+    return spec.cost_usd
 
 
 def configure_logging(

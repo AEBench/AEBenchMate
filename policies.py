@@ -137,7 +137,7 @@ def generator_options(
             output_dir,
             output_base_dir=output_base_dir,
         ),
-        hooks=_HOOK_MATCHERS,
+        hooks=hook_matchers(),
         sandbox={
             "enabled": True,
             "autoAllowBashIfSandboxed": True,
@@ -160,7 +160,7 @@ def write_policy_files(
     examples_dir: Path | None = None,
     *,
     output_base_dir: Path | None = None,
-) -> None:
+) -> tuple[Path, Path]:
     artifact_dir = artifact_dir.resolve()
     output_dir = output_dir.resolve()
     artifact_readme = artifact_readme.resolve()
@@ -196,6 +196,7 @@ def write_policy_files(
         "utf-8",
     )
 
+    return settings_path, claude_md_path
 
 
 def permission_handler(
@@ -212,8 +213,9 @@ def permission_handler(
     async def can_use_tool(
         tool_name: str,
         input_data: dict[str, Any],
-        _context: ToolPermissionContext,
+        context: ToolPermissionContext,
     ) -> PermissionResultAllow | PermissionResultDeny:
+        del context
 
         if tool_name not in _ALLOWED_GENERATOR_TOOLS:
             return PermissionResultDeny(
@@ -245,14 +247,16 @@ def permission_handler(
 
 
 async def keepalive_hook(
-    _input_data: dict[str, Any],
-    _tool_use_id: str | None,
-    _context: Any,
+    input_data: dict[str, Any],
+    tool_use_id: str | None,
+    context: Any,
 ) -> dict[str, Any]:
+    del input_data, tool_use_id, context
     return {"continue_": True}
 
 
-_HOOK_MATCHERS: dict[str, list[HookMatcher]] = {"PreToolUse": [HookMatcher(hooks=[keepalive_hook])]}
+def hook_matchers() -> dict[str, list[HookMatcher]]:
+    return {"PreToolUse": [HookMatcher(hooks=[keepalive_hook])]}
 
 
 def _build_settings(output_dir: Path) -> dict[str, Any]:
@@ -455,15 +459,20 @@ def _resolve_tool_path(root: Path, value: str) -> Path:
 
 
 def _is_within_path(path: Path, parent: Path) -> bool:
-    return path.is_relative_to(parent)
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
 
 
 def _is_secret_path(root: Path, path: Path) -> bool:
     if path.name in _SECRET_FILE_NAMES:
         return True
-    if not path.is_relative_to(root):
+    try:
+        rel = path.relative_to(root)
+    except ValueError:
         return False
-    rel = path.relative_to(root)
     for part in rel.parts:
         if part.startswith(".env"):
             return True

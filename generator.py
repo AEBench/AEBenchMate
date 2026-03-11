@@ -11,16 +11,18 @@ from claude_agent_sdk import ClaudeSDKClient
 from policies import generator_options, write_policy_files
 from utils import (
     EvalSpec,
-    read_feedback_text,
+    add_cost,
+    budget_exhausted,
     read_json_if_exists,
     read_response,
+    read_text_if_exists,
 )
 
 logger = logging.getLogger("generator")
 
 
 @dataclass(frozen=True)
-class ArtifactPlan:
+class PlanBundle:
     artifact_plan_path: Path | None
     artifact_name: str
     source_file: str
@@ -29,19 +31,6 @@ class ArtifactPlan:
     build_artifact: tuple[dict[str, Any], ...]
     benchmark_prep: tuple[dict[str, Any], ...]
     experiment_runs: tuple[dict[str, Any], ...]
-
-    @classmethod
-    def empty(cls) -> "ArtifactPlan":
-        return cls(
-            artifact_plan_path=None,
-            artifact_name="",
-            source_file="",
-            summary="",
-            env_setup=(),
-            build_artifact=(),
-            benchmark_prep=(),
-            experiment_runs=(),
-        )
 
 
 @dataclass(frozen=True)
@@ -65,7 +54,7 @@ async def generate(spec: EvalSpec) -> GenerationResult:
         raise ValueError("howto_path is required for generator")
 
     artifact_plan = _load_artifact_plan(spec.artifact_plan_path)
-    feedback_text = read_feedback_text(spec.feedback_path)
+    feedback_text = _read_feedback_text(spec.feedback_path)
     output_dir = spec.output_dir
 
     logger.info(
@@ -85,7 +74,7 @@ async def generate(spec: EvalSpec) -> GenerationResult:
         output_base_dir=spec.output_base_dir,
     )
 
-    if spec.over_budget:
+    if budget_exhausted(spec):
         logger.warning(
             "budget exhausted before generation cost_usd=%.4f limit=%.4f",
             spec.cost_usd,
@@ -119,10 +108,10 @@ async def generate(spec: EvalSpec) -> GenerationResult:
         if text:
             transcript_parts.append(text)
 
-        spec.add_cost(cost_usd)
+        add_cost(spec, cost_usd)
         logger.info("session_cost_usd=%.6f accumulated=%.6f", cost_usd or 0, spec.cost_usd)
 
-    generation_ok = not spec.over_budget
+    generation_ok = not budget_exhausted(spec)
 
     return GenerationResult(
         success=generation_ok,
@@ -132,21 +121,30 @@ async def generate(spec: EvalSpec) -> GenerationResult:
     )
 
 
-def _load_artifact_plan(path: Path | None) -> ArtifactPlan:
+def _read_feedback_text(feedback_path: Path | None) -> str | None:
+    if feedback_path is None:
+        return None
+    text = read_text_if_exists(feedback_path)
+    if text is None:
+        return None
+    return text.strip() or None
+
+
+def _load_artifact_plan(path: Path | None) -> PlanBundle:
     if path is None:
-        return ArtifactPlan.empty()
+        return _empty_plan_bundle()
 
     payload = read_json_if_exists(path)
     if payload is None or not isinstance(payload, dict):
         if payload is not None:
             logger.warning("artifact plan %s is not a JSON object", path)
-        return ArtifactPlan.empty()
+        return _empty_plan_bundle()
 
     stages = payload.get("stages", {})
     if not isinstance(stages, dict):
         stages = {}
 
-    return ArtifactPlan(
+    return PlanBundle(
         artifact_plan_path=path,
         artifact_name=str(payload.get("artifact_name", "")),
         source_file=str(payload.get("source_file", "")),
@@ -155,6 +153,19 @@ def _load_artifact_plan(path: Path | None) -> ArtifactPlan:
         build_artifact=_load_stage_items(stages, "build_artifact"),
         benchmark_prep=_load_stage_items(stages, "benchmark_prep"),
         experiment_runs=_load_stage_items(stages, "experiment_runs"),
+    )
+
+
+def _empty_plan_bundle() -> PlanBundle:
+    return PlanBundle(
+        artifact_plan_path=None,
+        artifact_name="",
+        source_file="",
+        summary="",
+        env_setup=(),
+        build_artifact=(),
+        benchmark_prep=(),
+        experiment_runs=(),
     )
 
 
@@ -168,7 +179,7 @@ def _load_stage_items(
     return tuple(item for item in value if isinstance(item, dict))
 
 
-def _count_plan_steps(bundle: ArtifactPlan) -> int:
+def _count_plan_steps(bundle: PlanBundle) -> int:
     return (
         len(bundle.env_setup)
         + len(bundle.build_artifact)
@@ -179,7 +190,7 @@ def _count_plan_steps(bundle: ArtifactPlan) -> int:
 
 def _build_prompt(
     spec: EvalSpec,
-    artifact_plan: ArtifactPlan,
+    artifact_plan: PlanBundle,
     feedback_text: str | None,
 ) -> str:
     howto_dir = spec.howto_path
@@ -292,7 +303,7 @@ def _build_prompt(
     return "\n".join(lines)
 
 
-def _summarize_artifact_plan(bundle: ArtifactPlan) -> str:
+def _summarize_artifact_plan(bundle: PlanBundle) -> str:
     lines: list[str] = []
 
     if bundle.artifact_plan_path is not None:

@@ -10,8 +10,10 @@ from claude_agent_sdk import ClaudeSDKClient
 from policies import planner_options
 from utils import (
     EvalSpec,
-    read_feedback_text,
+    add_cost,
+    budget_exhausted,
     read_response,
+    read_text_if_exists,
     strip_code_fences,
 )
 
@@ -125,8 +127,6 @@ def _str_field(d: dict[str, Any], key: str) -> str:
     return "" if val is None else str(val).strip()
 
 
-
-
 def _clean_item(raw_item: Any) -> dict[str, Any] | None:
     if not isinstance(raw_item, dict):
         return None
@@ -192,6 +192,15 @@ def _clean_plan(payload: dict[str, Any], *, readme_path: str) -> dict[str, Any]:
     return plan
 
 
+def _read_feedback_text(feedback_path: Path | None) -> str | None:
+    if feedback_path is None:
+        return None
+    text = read_text_if_exists(feedback_path)
+    if text is None:
+        return None
+    return text.strip() or None
+
+
 async def extract_artifact_plan(
     spec: EvalSpec,
     readme_text: str,
@@ -206,7 +215,7 @@ async def extract_artifact_plan(
         len(readme_text),
     )
 
-    if spec.over_budget:
+    if budget_exhausted(spec):
         logger.warning(
             "extractor stopped before query: budget exhausted cost_usd=%.6f limit=%.6f",
             spec.cost_usd,
@@ -215,7 +224,7 @@ async def extract_artifact_plan(
         warnings.append("budget exhausted before query")
         return _make_empty_plan(readme_path), warnings
 
-    feedback_text = read_feedback_text(spec.feedback_path)
+    feedback_text = _read_feedback_text(spec.feedback_path)
     prompt = _plan_prompt(readme_text, readme_path, feedback_text=feedback_text)
 
     logger.info(
@@ -225,9 +234,9 @@ async def extract_artifact_plan(
     )
 
     text, cost_usd = await _query_model(spec, prompt)
-    spec.add_cost(cost_usd)
+    add_cost(spec, cost_usd)
 
-    if spec.over_budget:
+    if budget_exhausted(spec):
         logger.warning(
             "extractor exceeded budget after response cost_usd=%.6f limit=%.6f",
             spec.cost_usd,
