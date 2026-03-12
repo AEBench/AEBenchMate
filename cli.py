@@ -472,8 +472,7 @@ def main(argv: list[str] | None = None) -> int:
             }
         else:
             generate_payload, oracle_report = asyncio.run(_run_generate_with_retries(spec))
-            ok = bool(generate_payload["success"])
-            ok = ok and bool(oracle_report["ok"])
+            ok = bool(generate_payload["success"]) and bool(oracle_report["ok"])
             payload = {
                 "generate": generate_payload,
                 "validate": {
