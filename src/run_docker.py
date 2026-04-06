@@ -35,7 +35,7 @@ from dashboard import (
     print_warning,
 )
 
-logger = logging.getLogger("staging.docker")
+logger = logging.getLogger("docker")
 
 _ARTIFACT_DIR = Path("/workspace/artifact")
 _GUIDANCE_DIR = Path("/workspace/guidance")
@@ -196,7 +196,7 @@ def run(spec: DockerArgs) -> DockerResult:
             write_json_file(metadata_path, state, indent=2, sort_keys=True)
 
     print_paths_summary(
-        output_agent_eval_dir=output_agent_eval_dir,
+        clean_agent_eval_dir=output_agent_eval_dir,
         internals_dir=run_dir,
         report_path=report_path,
     )

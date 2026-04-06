@@ -10,14 +10,25 @@ from claude_agent_sdk import ClaudeSDKClient
 from policies import planner_options
 from utils import (
     EvalSpec,
-    add_cost,
-    budget_exhausted,
     read_response,
-    read_text_if_exists,
+    log_debug_json,
+    log_debug_spec,
+    log_debug_stage_counts,
+    log_debug_text,
     strip_code_fences,
+    read_feedback_text,
+)
+from dashboard import (
+    print_agent_line,
+    print_cost,
+    print_info,
+    print_stage_header,
+    print_success,
+    print_warning,
 )
 
 logger = logging.getLogger("extractor")
+
 
 STAGES = (
     "env_setup",
@@ -101,14 +112,21 @@ async def _query_model(spec: EvalSpec, prompt: str) -> tuple[str, float | None]:
     options = planner_options(spec)
     async with ClaudeSDKClient(options=options) as client:
         await client.query(prompt)
-        return await read_response(client, logger=logger, verbose=spec.verbose)
+        return await read_response(
+                        client,
+                        logger=logger,
+                        verbose=spec.verbose,
+                        line_fn=lambda line: print_agent_line(line, stage="extractor"),
+                    )
 
 
 def _parse_plan_json(text: str) -> dict[str, Any]:
     cleaned = strip_code_fences(text)
     payload = json.loads(cleaned)
+
     if not isinstance(payload, dict):
         raise ValueError("model response must be a JSON object")
+
     return payload
 
 
@@ -118,7 +136,12 @@ def _make_empty_plan(readme_path: str) -> dict[str, Any]:
         "artifact_name": "",
         "source_file": readme_path,
         "summary": "",
-        "stages": {stage: [] for stage in STAGES},
+        "stages": {
+            "env_setup": [],
+            "build_artifact": [],
+            "benchmark_prep": [],
+            "experiment_runs": [],
+        },
     }
 
 
@@ -139,8 +162,8 @@ def _clean_item(raw_item: Any) -> dict[str, Any] | None:
     raw_outputs = raw_item.get("expected_outputs", [])
     expected_outputs: list[str] = []
     if isinstance(raw_outputs, list):
-        for v in raw_outputs:
-            text = str(v).strip() if v is not None else ""
+        for raw_output in raw_outputs:
+            text = str(raw_output).strip() if raw_output is not None else ""
             if text:
                 expected_outputs.append(text)
 
@@ -158,47 +181,45 @@ def _clean_item(raw_item: Any) -> dict[str, Any] | None:
 def _clean_stage(raw_items: Any) -> list[dict[str, Any]]:
     if not isinstance(raw_items, list):
         return []
-    items = []
+
+    items: list[dict[str, Any]] = []
     for raw_item in raw_items:
-        normalized = _clean_item(raw_item)
-        if normalized is not None:
-            items.append(normalized)
+        normalized_item = _clean_item(raw_item)
+        if normalized_item is not None:
+            items.append(normalized_item)
+
     return items
 
 
 def _assign_item_ids(plan: dict[str, Any]) -> None:
     for stage_name, prefix in _STAGE_PREFIX.items():
-        for index, item in enumerate(plan["stages"][stage_name], start=1):
+        items = plan["stages"][stage_name]
+        for index, item in enumerate(items, start=1):
             item["item_id"] = f"{prefix}-{index:03d}"
 
 
 def _clean_plan(payload: dict[str, Any], *, readme_path: str) -> dict[str, Any]:
     plan = _make_empty_plan(readme_path)
 
-    plan["artifact_name"] = _str_field(payload, "artifact_name")
+    artifact_name = _str_field(payload, "artifact_name")
     source_file = _str_field(payload, "source_file")
+    summary = _str_field(payload, "summary")
+
+    plan["artifact_name"] = artifact_name
     if source_file:
         plan["source_file"] = source_file
-    plan["summary"] = _str_field(payload, "summary")
+    plan["summary"] = summary
 
     raw_stages = payload.get("stages", {})
     if not isinstance(raw_stages, dict):
         raw_stages = {}
 
     for stage_name in STAGES:
-        plan["stages"][stage_name] = _clean_stage(raw_stages.get(stage_name, []))
+        raw_items = raw_stages.get(stage_name, [])
+        plan["stages"][stage_name] = _clean_stage(raw_items)
 
     _assign_item_ids(plan)
     return plan
-
-
-def _read_feedback_text(feedback_path: Path | None) -> str | None:
-    if feedback_path is None:
-        return None
-    text = read_text_if_exists(feedback_path)
-    if text is None:
-        return None
-    return text.strip() or None
 
 
 async def extract_artifact_plan(
@@ -206,39 +227,66 @@ async def extract_artifact_plan(
     readme_text: str,
     readme_path: str = "README.md",
 ) -> tuple[dict[str, Any], list[str]]:
+    """Parse README into a normalized artifact plan via one model call."""
     spec = spec.resolved()
+    log_debug_spec(logger, spec)
     warnings: list[str] = []
 
     logger.info(
-        "starting extraction from README path=%s chars=%d",
+        "starting planner extraction from README path=%s chars=%d",
         readme_path,
         len(readme_text),
     )
 
-    if budget_exhausted(spec):
+    print_stage_header("extractor", spec.artifact_id)
+    print_info(f"reading README: {readme_path}")
+
+    if spec.over_budget:
         logger.warning(
-            "extractor stopped before query: budget exhausted cost_usd=%.6f limit=%.6f",
+            "planner stopped before query because budget is exhausted cost_usd=%.6f limit_usd=%.6f",
             spec.cost_usd,
             spec.max_budget_usd,
         )
         warnings.append("budget exhausted before query")
+        print_warning(
+            f"extractor budget exhausted before query: "
+            f"${spec.cost_usd:.6f} / ${spec.max_budget_usd:.6f}"
+        )
+
         return _make_empty_plan(readme_path), warnings
 
-    feedback_text = _read_feedback_text(spec.feedback_path)
-    prompt = _plan_prompt(readme_text, readme_path, feedback_text=feedback_text)
+    feedback_text = read_feedback_text(spec.feedback_path)
+    prompt = _plan_prompt(
+        readme_text,
+        readme_path,
+        feedback_text=feedback_text,
+    )
 
+    log_debug_text(logger, "Planner prompt", prompt, max_chars=5000)
     logger.info(
         "extractor prompt size: chars=%d bytes=%d",
         len(prompt),
         len(prompt.encode("utf-8")),
     )
+    text, cost_usd, usage = await _query_model(spec, prompt)
 
-    text, cost_usd = await _query_model(spec, prompt)
-    add_cost(spec, cost_usd)
+    if usage is not None:
+        logger.info(
+            "extractor tokens: input=%s output=%s cache_create=%s cache_read=%s",
+            usage.get("input_tokens"),
+            usage.get("output_tokens"),
+            usage.get("cache_creation_input_tokens"),
+            usage.get("cache_read_input_tokens"),
+        )
 
-    if budget_exhausted(spec):
+    spec.add_cost(cost_usd)
+    print_cost(cost_usd, spec.cost_usd)
+
+    log_debug_text(logger, "Raw planner response", text, max_chars=3000)
+
+    if spec.over_budget:
         logger.warning(
-            "extractor exceeded budget after response cost_usd=%.6f limit=%.6f",
+            "planner exceeded budget after model response cost_usd=%.6f limit_usd=%.6f",
             spec.cost_usd,
             spec.max_budget_usd,
         )
@@ -247,14 +295,30 @@ async def extract_artifact_plan(
     try:
         payload = _parse_plan_json(text)
     except (ValueError, json.JSONDecodeError) as exc:
-        logger.warning("extractor JSON parse failed for %s: %s", readme_path, exc)
+        logger.warning("planner JSON parse failed for %s: %s", readme_path, exc)
         warnings.append(f"JSON parse failed: {exc}")
         return _make_empty_plan(readme_path), warnings
 
-    plan = _clean_plan(payload, readme_path=readme_path)
+    log_debug_json(logger, "Parsed planner payload", payload, max_chars=4000)
+
+    plan = _clean_plan(
+        payload,
+        readme_path=readme_path,
+    )
+
+    log_debug_stage_counts(logger, plan["stages"])
+    log_debug_json(logger, "Normalized artifact plan", plan, max_chars=5000)
+
+    print_success(
+        "extractor finished "
+        f"(env={len(plan['stages']['env_setup'])}, "
+        f"build={len(plan['stages']['build_artifact'])}, "
+        f"prep={len(plan['stages']['benchmark_prep'])}, "
+        f"run={len(plan['stages']['experiment_runs'])})"
+    )
 
     logger.info(
-        "extraction complete: env=%d build=%d prep=%d run=%d cost_usd=%.6f",
+        "finished planner extraction: env=%d build=%d prep=%d run=%d cost_usd=%.6f",
         len(plan["stages"]["env_setup"]),
         len(plan["stages"]["build_artifact"]),
         len(plan["stages"]["benchmark_prep"]),

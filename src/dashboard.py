@@ -140,9 +140,9 @@ def print_paths_summary(
     table.add_column("Value", style="white")
 
     if clean_agent_eval_dir is not None:
-        table.add_row("output", clean_agent_eval_dir.as_posix())
+        table.add_row("_agent_eval", clean_agent_eval_dir.as_posix())
     if internals_dir is not None:
-        table.add_row("internals", internals_dir.as_posix())
+        table.add_row("_agent_internals", internals_dir.as_posix())
     if report_path is not None:
         table.add_row("report", report_path.as_posix())
 

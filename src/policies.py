@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 from __future__ import annotations
 
 import json
@@ -85,6 +86,36 @@ _FORBIDDEN_BASH = re.compile(
     r"|\brm\s+-rf\b"
 )
 
+_BLOCKED_SOURCE_ROOTS = {
+    "src",
+    "source",
+    "lib",
+    "libs",
+    "test",
+    "tests",
+    "tester",
+    "internal",
+    "pkg",
+    "cmd",
+    "core",
+    "engine",
+    "compiler",
+    "runtime",
+    "api",
+    "backend",
+    "frontend",
+    "server",
+    "client",
+    "services",
+    "modules",
+    "components",
+    "include",
+    "java",
+    "python",
+    "rust",
+    "swift",
+}
+
 _SECRET_FILE_NAMES = (
     ".env",
     ".env.local",
@@ -137,7 +168,7 @@ def generator_options(
             output_dir,
             output_base_dir=output_base_dir,
         ),
-        hooks=hook_matchers(),
+        hooks=_HOOK_MATCHERS,
         sandbox={
             "enabled": True,
             "autoAllowBashIfSandboxed": True,
@@ -160,7 +191,8 @@ def write_policy_files(
     examples_dir: Path | None = None,
     *,
     output_base_dir: Path | None = None,
-) -> tuple[Path, Path]:
+) -> None:
+    """Write .claude/settings.json and CLAUDE.md for the generator run."""
     artifact_dir = artifact_dir.resolve()
     output_dir = output_dir.resolve()
     artifact_readme = artifact_readme.resolve()
@@ -181,22 +213,20 @@ def write_policy_files(
     settings_path = claude_dir / "settings.json"
     claude_md_path = claude_dir / "CLAUDE.md"
 
-    write_json_file(settings_path, _build_settings(output_dir), indent=2, sort_keys=True)
+    settings_payload = _build_settings(output_dir)
+    write_json_file(settings_path, settings_payload, indent=2, sort_keys=True)
 
-    claude_md_path.write_text(
-        _build_claude_md(
-            artifact_dir=artifact_dir,
-            output_dir=output_dir,
-            artifact_readme=artifact_readme,
-            howto_path=howto_path,
-            artifact_plan_path=artifact_plan_path,
-            primitives_dir=primitives_dir,
-            examples_dir=examples_dir,
-        ),
-        "utf-8",
+    claude_md = _build_claude_md(
+        artifact_dir=artifact_dir,
+        output_dir=output_dir,
+        artifact_readme=artifact_readme,
+        howto_path=howto_path,
+        artifact_plan_path=artifact_plan_path,
+        primitives_dir=primitives_dir,
+        examples_dir=examples_dir,
     )
-
-    return settings_path, claude_md_path
+    claude_md_path.parent.mkdir(parents=True, exist_ok=True)
+    claude_md_path.write_text(claude_md, "utf-8")
 
 
 def permission_handler(
@@ -204,7 +234,7 @@ def permission_handler(
     output_dir: Path,
     *,
     output_base_dir: Path | None = None,
-) -> Any:
+):
     artifact_dir = artifact_dir.resolve()
     output_dir = output_dir.resolve()
     claude_base = output_base_dir.resolve() if output_base_dir is not None else artifact_dir
@@ -238,6 +268,8 @@ def permission_handler(
         if tool_name == "Read":
             return _check_read_permission(
                 artifact_dir=artifact_dir,
+                output_dir=output_dir,
+                claude_dir=claude_dir,
                 input_data=input_data,
             )
 
@@ -247,22 +279,20 @@ def permission_handler(
 
 
 async def keepalive_hook(
-    input_data: dict[str, Any],
-    tool_use_id: str | None,
-    context: Any,
+    _input_data: dict[str, Any],
+    _tool_use_id: str | None,
+    _context: Any,
 ) -> dict[str, Any]:
-    del input_data, tool_use_id, context
     return {"continue_": True}
 
 
-def hook_matchers() -> dict[str, list[HookMatcher]]:
-    return {"PreToolUse": [HookMatcher(hooks=[keepalive_hook])]}
+_HOOK_MATCHERS: dict[str, list[HookMatcher]] = {"PreToolUse": [HookMatcher(hooks=[keepalive_hook])]}
 
 
 def _build_settings(output_dir: Path) -> dict[str, Any]:
     rel_output = "/" + output_dir.name
 
-    return {
+    settings = {
         "permissions": {
             "defaultMode": "default",
             "allow": [
@@ -304,6 +334,8 @@ def _build_settings(output_dir: Path) -> dict[str, Any]:
         },
     }
 
+    return settings
+
 
 def _build_claude_md(
     artifact_dir: Path,
@@ -332,13 +364,15 @@ def _build_claude_md(
     if artifact_plan_path is not None:
         lines.append(f"Artifact plan: {artifact_plan_path.as_posix()}")
 
-    lines.extend([
-        "",
-        "Before writing code, read in this order:",
-        f"1. Read {instructions_path} file in the {howto_path.as_posix()}/ directory.",
-        f"2. Read {building_blocks_path}/ next and reuse those building blocks whenever possible.",
-        f"3. Read {examples_path}/ next and reuse their structure and patterns when appropriate.",
-    ])
+    lines.extend(
+        [
+            "",
+            "Before writing code, read in this order:",
+            f"1. Read {instructions_path} file in the {howto_path.as_posix()}/ directory.",
+            f"2. Read {building_blocks_path}/ next and reuse those building blocks whenever possible.",
+            f"3. Read {examples_path}/ next and reuse their structure and patterns when appropriate.",
+        ]
+    )
 
     next_index = 4
     if artifact_plan_path is not None:
@@ -347,39 +381,54 @@ def _build_claude_md(
 
     lines.append(f"{next_index}. {artifact_readme.as_posix()}")
 
-    lines.extend([
-        "",
-        "Hard constraint: do not inspect artifact source-code files unless a specific planned step cannot be resolved from artifact_plan.json, README, configuration, scripts/script-like, or infrastructure-related files.",
-        "Rules:",
-        "- Follow HOWTO.md conventions first.",
-        "- Reuse patterns from the example oracles when applicable.",
-        "- Use the artifact evaluation plan as the primary structured checklist when it is present.",
-        "- Only use the artifact README or repository to resolve ambiguity, fill gaps, or verify uncertain steps.",
-        "- Do not proactively inspect artifact source code trees; only inspect named non-source files or paths when needed to confirm a planned step.",
-        "- Only deviate from the examples when the artifact requires it.",
-        "- Write only under _agent_eval/ and .claude/.",
-        "- Do not modify artifact source files.",
-        "- Keep all oracles non-interactive, idempotent, and time-bounded.",
-        "- Any use of subprocess.run, subprocess.check_call, or subprocess.check_output must include an explicit timeout=... argument.",
-        "- Before finishing, verify that no generated oracle contains an unbounded subprocess call.",
-        "- Prefer evaluator base classes and primitives already present in the framework.",
-        "- Use refs JSON files only when they are needed by the checks.",
-        "- If exact refs values are unknown, preserve the schema and use typed placeholders.",
-        '- Use 0.0 for floats, 0 for ints, "" for strings, false for booleans, [] for lists, and {} for objects.',
-        "",
-        "Create _agent_eval/oracle_plan.json with:",
-        "- howto_rules",
-        "- example_patterns",
-        "- borrowed_structure",
-        "- artifact_specific_adaptations",
-        "- reference_templates",
-        "- plan_summary",
-        "- step_coverage",
-        "- step_gaps",
-        "- step_augmentations",
-    ])
+    lines.extend(
+        [
+            "",
+            "Hard constraint: do not inspect artifact source-code files unless a specific planned step cannot be resolved from artifact_plan.json, README, configuration, scripts/script-like, or infrastructure-related files.",
+            "Rules:",
+            "- Follow HOWTO.md conventions first.",
+            "- Reuse patterns from the example oracles when applicable.",
+            "- Use the artifact evaluation plan as the primary structured checklist when it is present.",
+            "- Only use the artifact README or repository to resolve ambiguity, fill gaps, or verify uncertain steps.",
+            "- Do not proactively inspect artifact source code trees; only inspect named non-source files or paths when needed to confirm a planned step.",
+            "- Only deviate from the examples when the artifact requires it.",
+            "- Write only under _agent_eval/ and .claude/.",
+            "- Do not modify artifact source files.",
+            "- Keep all oracles non-interactive, idempotent, and time-bounded.",
+            "- Any use of subprocess.run, subprocess.check_call, or subprocess.check_output must include an explicit timeout=... argument.",
+            "- Before finishing, verify that no generated oracle contains an unbounded subprocess call.",
+            "- Prefer evaluator base classes and primitives already present in the framework.",
+            "- Use refs JSON files only when they are needed by the checks.",
+            "- If exact refs values are unknown, preserve the schema and use typed placeholders.",
+            '- Use 0.0 for floats, 0 for ints, "" for strings, false for booleans, [] for lists, and {} for objects.',
+            "",
+            "Create _agent_eval/oracle_plan.json with:",
+            "- howto_rules",
+            "- example_patterns",
+            "- borrowed_structure",
+            "- artifact_specific_adaptations",
+            "- reference_templates",
+            "- plan_summary",
+            "- step_coverage",
+            "- step_gaps",
+            "- step_augmentations",
+        ]
+    )
 
     return "\n".join(lines) + "\n"
+
+
+def _is_likely_source_code_dir(root: Path, path: Path) -> bool:
+    try:
+        rel = path.relative_to(root)
+    except ValueError:
+        return False
+
+    if not rel.parts:
+        return False
+
+    first = rel.parts[0]
+    return first in _BLOCKED_SOURCE_ROOTS
 
 
 def _check_bash_permission(
@@ -387,13 +436,22 @@ def _check_bash_permission(
 ) -> PermissionResultAllow | PermissionResultDeny:
     command = str(input_data.get("command", "")).strip()
     if not command:
-        return PermissionResultDeny(message="Empty bash command is not allowed.", interrupt=True)
+        return PermissionResultDeny(
+            message="Empty bash command is not allowed.",
+            interrupt=True,
+        )
 
     if input_data.get("dangerouslyDisableSandbox"):
-        return PermissionResultDeny(message="Unsandboxed bash is not allowed.", interrupt=True)
+        return PermissionResultDeny(
+            message="Unsandboxed bash is not allowed.",
+            interrupt=True,
+        )
 
     if _FORBIDDEN_BASH.search(command):
-        return PermissionResultDeny(message=f"Blocked bash command: {command}", interrupt=True)
+        return PermissionResultDeny(
+            message=f"Blocked bash command: {command}",
+            interrupt=True,
+        )
 
     return PermissionResultAllow(updated_input=input_data)
 
@@ -407,22 +465,30 @@ def _check_write_permission(
 ) -> PermissionResultAllow | PermissionResultDeny:
     tool_path = _extract_tool_path(input_data)
     if tool_path is None:
-        return PermissionResultDeny(message=f"{tool_name} requires file_path.", interrupt=True)
+        return PermissionResultDeny(
+            message=f"{tool_name} requires file_path.",
+            interrupt=True,
+        )
 
     resolved = _resolve_tool_path(artifact_dir, tool_path)
-    if not _is_within_path(resolved, output_dir) and not _is_within_path(resolved, claude_dir):
+    if not _is_within_path(resolved, output_dir) and not _is_within_path(
+        resolved,
+        claude_dir,
+    ):
         return PermissionResultDeny(
             message=f"Writes are limited to {output_dir} and {claude_dir}.",
             interrupt=True,
         )
 
-    updated = dict(input_data)
-    updated["file_path"] = resolved.as_posix()
-    return PermissionResultAllow(updated_input=updated)
+    updated_input = dict(input_data)
+    updated_input["file_path"] = resolved.as_posix()
+    return PermissionResultAllow(updated_input=updated_input)
 
 
 def _check_read_permission(
     artifact_dir: Path,
+    output_dir: Path,
+    claude_dir: Path,
     input_data: dict[str, Any],
 ) -> PermissionResultAllow | PermissionResultDeny:
     tool_path = _extract_tool_path(input_data)
@@ -436,18 +502,36 @@ def _check_read_permission(
             interrupt=True,
         )
 
-    updated = dict(input_data)
-    updated["file_path"] = resolved.as_posix()
-    return PermissionResultAllow(updated_input=updated)
+    if (
+        _is_within_path(resolved, artifact_dir)
+        and not _is_within_path(resolved, output_dir)
+        and not _is_within_path(resolved, claude_dir)
+        and _is_likely_source_code_dir(artifact_dir, resolved)
+    ):
+        return PermissionResultDeny(
+            message=(
+                "Reading artifact source-tree files is blocked under source roots "
+                "such as src/, lib/, internal/, pkg/, cmd/, and app/. "
+                "Use artifact_plan.json, the README, setup files, scripts/, "
+                "manifests, and named non-source paths instead."
+            ),
+            interrupt=True,
+        )
+
+    updated_input = dict(input_data)
+    updated_input["file_path"] = resolved.as_posix()
+    return PermissionResultAllow(updated_input=updated_input)
 
 
 def _extract_tool_path(input_data: dict[str, Any]) -> str | None:
     value = input_data.get("file_path")
     if value:
         return str(value)
+
     value = input_data.get("path")
     if value:
         return str(value)
+
     return None
 
 
@@ -459,21 +543,20 @@ def _resolve_tool_path(root: Path, value: str) -> Path:
 
 
 def _is_within_path(path: Path, parent: Path) -> bool:
-    try:
-        path.relative_to(parent)
-        return True
-    except ValueError:
-        return False
+    return path.is_relative_to(parent)
 
 
 def _is_secret_path(root: Path, path: Path) -> bool:
     if path.name in _SECRET_FILE_NAMES:
         return True
+
     try:
         rel = path.relative_to(root)
     except ValueError:
         return False
+
     for part in rel.parts:
         if part.startswith(".env"):
             return True
+
     return False

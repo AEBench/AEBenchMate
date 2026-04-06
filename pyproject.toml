@@ -1,0 +1,23 @@
+[project]
+name = "benchmate"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "claude-agent-sdk",
+    "rich",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.pytest.ini_options]
+pythonpath = [".", "src"]
+testpaths = ["tests"]
+markers = [
+    "sanity: fast tests, no external services",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]

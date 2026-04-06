@@ -10,9 +10,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from case_builder import build_case_bundle, write_case_toml
 from extractor import extract_artifact_plan
+import dataclasses
+
 from generator import generate as generate_oracles
-from generator import _as_dict as generation_as_dict
 from utils import (
     EvalSpec,
     configure_logging,
@@ -36,7 +38,7 @@ from dashboard import (
     print_warning,
 )
 
-logger = logging.getLogger("staging")
+logger = logging.getLogger("cli")
 
 
 def _project_root() -> Path:
@@ -72,7 +74,7 @@ def _add_shared_args(parser: argparse.ArgumentParser) -> None:
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="staging: extract, generate, validate, or full pipeline.",
+        description="CLI: extract, generate, validate, or full pipeline.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -101,6 +103,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     pipeline_parser.add_argument("--artifact-readme", required=True)
     pipeline_parser.add_argument("--howto-path",
                                  help="Path to howto directory (contains add_case.md).")
+    pipeline_parser.add_argument("--case-dir",
+                                 help="Where to write case bundle. Skipped if omitted.")
+    pipeline_parser.add_argument("--upstream-url",
+                                 help="Upstream git URL for case.toml.")
+    pipeline_parser.add_argument("--upstream-ref",
+                                 help="Full commit hash for case.toml.")
+
     return parser.parse_args(argv)
 
 
@@ -132,6 +141,9 @@ def _make_spec(
     elif guidance_dir is not None and (guidance_dir / "examples").is_dir():
         examples_dir = guidance_dir / "examples"
 
+    raw_case_dir = getattr(args, "case_dir", None)
+    output_base_dir: Path | None = Path(raw_case_dir) if raw_case_dir else None
+
     spec = EvalSpec(
         artifact_id=args.artifact_id if args.artifact_id else Path(args.artifact_dir).name,
         artifact_dir=Path(args.artifact_dir),
@@ -141,6 +153,7 @@ def _make_spec(
         primitives_dir=primitives_dir,
         examples_dir=examples_dir,
         output_dir_name=args.output_dir_name,
+        output_base_dir=output_base_dir,
         max_turns=args.max_turns,
         max_repairs=args.max_repairs,
         max_budget_usd=args.max_budget_usd,
@@ -348,7 +361,7 @@ async def _run_generate_with_retries(
 
 async def _run_generate(spec: EvalSpec) -> dict[str, Any]:
     result = await generate_oracles(spec)
-    return generation_as_dict(result)
+    return dataclasses.asdict(result)
 
 
 def _run_validate(spec: EvalSpec, target: str) -> dict[str, Any]:
@@ -361,6 +374,44 @@ def _run_validate(spec: EvalSpec, target: str) -> dict[str, Any]:
         payload["oracle"] = _run_validate_generate(spec)
 
     return payload
+
+
+def _run_build_case_bundle(
+    spec: EvalSpec,
+    *,
+    case_dir: Path,
+    upstream_url: str,
+    upstream_ref: str,
+) -> dict[str, Any]:
+    """Build case bundle from _agent_eval/ output."""
+    print_stage_header("case bundle", spec.artifact_id)
+
+    agent_eval_dir = spec.output_dir
+
+    readme_path_in_artifact = "README.md"
+    if spec.artifact_readme is not None:
+        try:
+            readme_path_in_artifact = spec.artifact_readme.relative_to(spec.artifact_dir).as_posix()
+        except ValueError:
+            readme_path_in_artifact = spec.artifact_readme.name
+
+    toml_content = write_case_toml(
+        case_id=spec.artifact_id,
+        upstream_url=upstream_url,
+        upstream_ref=upstream_ref,
+        readme_path_in_artifact=readme_path_in_artifact,
+    )
+    written = build_case_bundle(
+        agent_eval_dir=agent_eval_dir,
+        case_dir=case_dir,
+        case_toml_content=toml_content,
+    )
+    print_success(f"case bundle written to {case_dir} ({len(written)} files)")
+    print_info("Next steps:")
+    print_info("  1. Review oracle/ files and fill in TODOs in case.toml")
+    print_info("  2. Add ref data to refs/ if needed")
+    print_info("  3. Register the case in cases.json")
+    return {"case_dir": str(case_dir), "files_written": written}
 
 
 async def _run_pipeline(
@@ -516,6 +567,21 @@ def main(argv: list[str] | None = None) -> int:
                 skip_validation=args.skip_validation,
             )
         )
+
+        case_bundle_payload: dict[str, Any] | None = None
+        case_dir_arg = getattr(args, "case_dir", None)
+        if case_dir_arg and payload["ok"]:
+            case_bundle_payload = _run_build_case_bundle(
+                spec,
+                case_dir=Path(case_dir_arg),
+                upstream_url=getattr(args, "upstream_url", "") or "",
+                upstream_ref=getattr(args, "upstream_ref", "") or "",
+            )
+        elif case_dir_arg and not payload["ok"]:
+            print_warning("pipeline did not succeed — skipping case bundle assembly")
+
+        if case_bundle_payload is not None:
+            payload["case_bundle"] = case_bundle_payload
 
         _print_and_write_report(payload, args.report_path)
         if payload["ok"]:

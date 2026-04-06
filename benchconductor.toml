@@ -1,0 +1,7 @@
+# BenchConductor config.
+# Paths are relative to this file's directory unless absolute.
+
+[guidance]
+# Directory containing howtos/, primitives/, and examples/ subdirectories.
+# Set this to point at your guidance directory, or pass --guidance-dir on the CLI.
+# root = "/path/to/guidance"
