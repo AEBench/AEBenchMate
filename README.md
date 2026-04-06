@@ -1,6 +1,6 @@
-# BenchConductor
+# AEBenchMate
 
-BenchConductor is a small agent pipeline for adding new artifacts to [AEBench](https://github.com/bastoica/aebench). Given a research artifact and its README, it generates a standalone `_agent_eval/` oracle package that AEBench can later use to evaluate AI agents on artifact evaluation tasks.
+AEBenchMate is a small agent pipeline for adding new artifacts to [AEBench](https://github.com/bastoica/aebench). Given a research artifact and its README, it generates a standalone `_agent_eval/` oracle package that AEBench can later use to evaluate AI agents on artifact evaluation tasks.
 
 ## 1. Overview
 
@@ -26,7 +26,7 @@ Each stage can run independently or as part of the full pipeline. The extractor 
 ### Setup
 
 ```bash
-cd BenchConductor
+cd AEBenchMate
 uv sync
 export ANTHROPIC_API_KEY=sk-ant-...
 ```

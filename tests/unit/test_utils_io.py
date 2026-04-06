@@ -24,18 +24,18 @@ def test_load_guidance_root_no_config(tmp_path: Path) -> None:
 
 
 def test_load_guidance_root_no_guidance_section(tmp_path: Path) -> None:
-    (tmp_path / "benchconductor.toml").write_text("[build]\nopt = 1\n")
+    (tmp_path / "aebenchmate.toml").write_text("[build]\nopt = 1\n")
     assert load_guidance_root(tmp_path) is None
 
 
 def test_load_guidance_root_returns_resolved(tmp_path: Path) -> None:
-    (tmp_path / "benchconductor.toml").write_text('[guidance]\nroot = "my_guidance"\n')
+    (tmp_path / "aebenchmate.toml").write_text('[guidance]\nroot = "my_guidance"\n')
     result = load_guidance_root(tmp_path)
     assert result == (tmp_path / "my_guidance").resolve()
 
 
 def test_load_guidance_root_relative_path(tmp_path: Path) -> None:
-    (tmp_path / "benchconductor.toml").write_text('[guidance]\nroot = "./sub/dir"\n')
+    (tmp_path / "aebenchmate.toml").write_text('[guidance]\nroot = "./sub/dir"\n')
     result = load_guidance_root(tmp_path)
     assert result == (tmp_path / "sub" / "dir").resolve()
     assert result.is_absolute()

@@ -19,8 +19,8 @@ from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
 
 
 def load_guidance_root(project_root: Path) -> Path | None:
-    """Load guidance root path from benchconductor.toml."""
-    config_path = project_root / "benchconductor.toml"
+    """Load guidance root path from aebenchmate.toml."""
+    config_path = project_root / "aebenchmate.toml"
     if not config_path.is_file():
         return None
 

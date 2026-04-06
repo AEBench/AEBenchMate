@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
+.claude/
+
+# Testing
+.pytest_cache/
+.pyre/
+
+# Outputs
+outputs/
+.env
+# Repo-local case bundles
+cases/*
+!cases/*/
+!cases/*/artifact/
+cases/*/artifact/*
+!cases/*/artifact/README.md
+!cases/*/case.toml
+!cases/*/oracles/
+!cases/*/oracles/**
+cases/*/oracles/**/__pycache__/
+cases/*/oracles/**/*.py[cod]
+!cases/*/refs/
+!cases/*/refs/**
+cases/*/.runs
+cases/*/.runs/
