@@ -43,7 +43,7 @@ def test_write_case_toml_newlines_in_text_field() -> None:
 
 
 def test_build_case_bundle_all_files(tmp_path: Path) -> None:
-    ae = tmp_path / "src" / "_agent_eval"
+    ae = tmp_path / "src" / "oracles"
     ae.mkdir(parents=True)
     for name in ("env_setup.py", "artifact_build.py", "benchmark_prep.py", "experiment_runs.py", "common.py"):
         (ae / name).write_text(f"# {name}\n")
@@ -53,17 +53,17 @@ def test_build_case_bundle_all_files(tmp_path: Path) -> None:
 
     case_dir = tmp_path / "out"
     toml_text = write_case_toml(case_id="bundle-test")
-    written = build_case_bundle(agent_eval_dir=ae, case_dir=case_dir, case_toml_content=toml_text)
+    written = build_case_bundle(oracles_dir=ae, case_dir=case_dir, case_toml_content=toml_text)
 
     assert (case_dir / "case.toml").exists()
-    assert (case_dir / "oracle" / "env_setup.py").exists()
-    assert (case_dir / "oracle" / "common.py").exists()
+    assert (case_dir / "oracles" / "env_setup.py").exists()
+    assert (case_dir / "oracles" / "common.py").exists()
     assert (case_dir / "refs" / "data.json").exists()
     assert len(written) == 7  # toml + 5 py + 1 ref
 
 
 def test_build_case_bundle_nested_refs_not_recursed(tmp_path: Path) -> None:
-    ae = tmp_path / "src" / "_agent_eval"
+    ae = tmp_path / "src" / "oracles"
     ae.mkdir(parents=True)
     refs = ae / "refs"
     refs.mkdir()
@@ -73,7 +73,7 @@ def test_build_case_bundle_nested_refs_not_recursed(tmp_path: Path) -> None:
     (nested / "deep.json").write_text("{}")
 
     case_dir = tmp_path / "out"
-    written = build_case_bundle(agent_eval_dir=ae, case_dir=case_dir, case_toml_content="id = 'x'\n")
+    written = build_case_bundle(oracles_dir=ae, case_dir=case_dir, case_toml_content="id = 'x'\n")
 
     written_names = [Path(p).name for p in written]
     assert "top.json" in written_names
@@ -81,13 +81,13 @@ def test_build_case_bundle_nested_refs_not_recursed(tmp_path: Path) -> None:
 
 
 def test_build_case_bundle_missing_oracle_files(tmp_path: Path) -> None:
-    ae = tmp_path / "src" / "_agent_eval"
+    ae = tmp_path / "src" / "oracles"
     ae.mkdir(parents=True)
     (ae / "env_setup.py").write_text("# only one\n")
 
     case_dir = tmp_path / "out"
-    written = build_case_bundle(agent_eval_dir=ae, case_dir=case_dir, case_toml_content="id = 'x'\n")
+    written = build_case_bundle(oracles_dir=ae, case_dir=case_dir, case_toml_content="id = 'x'\n")
 
-    assert (case_dir / "oracle" / "env_setup.py").exists()
-    assert not (case_dir / "oracle" / "artifact_build.py").exists()
+    assert (case_dir / "oracles" / "env_setup.py").exists()
+    assert not (case_dir / "oracles" / "artifact_build.py").exists()
     assert len(written) == 2  # toml + 1 py

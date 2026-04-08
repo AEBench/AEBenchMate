@@ -1,16 +1,39 @@
 # AEBenchMate
 
-AEBenchMate is a small agent pipeline for adding new artifacts to [AEBench](https://github.com/bastoica/aebench). Given a research artifact and its README, it generates a standalone `_agent_eval/` oracle package that AEBench can later use to evaluate AI agents on artifact evaluation tasks.
+AEBenchMate is a small agent pipeline for adding new cases to [AEBench](https://github.com/bastoica/aebench). Given a research artifact and its README, it generates the `oracles/` package and reference data that AEBench uses to score AI agents on artifact evaluation tasks.
 
 ## 1. Overview
 
-The pipeline has three stages:
+AEBench evaluates AI agents by asking them to reproduce the results of a research paper. Each benchmark **case** bundles the paper's artifact with four **oracle** phases that grade the agent's work:
+
+1. **env_setup** — verify required tools are installed at correct versions
+2. **artifact_build** — build commands succeed and expected binaries are present
+3. **benchmark_prep** — datasets are downloaded, checksums match
+4. **experiment_runs** — experiments produce results within tolerance of reference
+
+A case lives in a self-contained directory:
+
+```plaintext
+cases/venue24_paper/
+├── case.toml              # manifest: ID, source, runtime, oracle config
+├── oracles/               # one module per phase
+│   ├── __init__.py
+│   ├── env_setup.py       # class OracleEnvSetup(CaseOracleEnvSetupBase)
+│   ├── artifact_build.py  # class OracleArtifactBuild(CaseOracleArtifactBuildBase)
+│   ├── benchmark_prep.py  # class OracleBenchmarkPrep(CaseOracleBenchmarkPrepBase)
+│   ├── experiment_runs.py # class OracleExperimentRuns(CaseOracleExperimentRunsBase)
+│   └── common.py          # shared helpers (not a phase)
+└── refs/                  # reference data (ground-truth checksums, timings, etc.)
+    └── *.json
+```
+
+AEBenchMate's job is to generate the `oracles/` and `refs/` content for a new case. It does this in three stages:
 
 1. **Extractor** — reads the artifact README and produces a structured `artifact_plan.json` describing what needs to be checked (dependencies, build steps, datasets, expected outputs, etc.)
 
-2. **Generator** — takes the artifact, the plan, a HOWTO guide, and a few example oracle directories, then generates the `_agent_eval/` package containing four oracle modules and a `common.py`
+2. **Generator** — takes the artifact, the plan, a HOWTO guide, and example oracle directories, then generates the `oracles/` package containing the four oracle modules, a `common.py`, and optional `refs/` data
 
-3. **Validator** — checks that the generated package is well-formed: files exist, Python compiles, required classes present, no forbidden calls, referenced ref files exist, plan coverage is adequate
+3. **Validator** — checks that the generated package is well-formed: files exist, Python compiles, required classes are present, no forbidden calls, referenced ref files exist, plan coverage is adequate
 
 Each stage can run independently or as part of the full pipeline. The extractor and generator call Claude via the SDK; the validator is deterministic and fast.
 
@@ -38,14 +61,14 @@ Users can also put environment variables in a `.env` file at the repo root. The 
 ```plaintext
 src/
 ├── cli.py            # unified CLI: extract, generate, validate, pipeline
-├── extractor.py      # stage 1: README → artifact_plan.json
-├── generator.py      # stage 2: plan + guidance → _agent_eval/
+├── extractor.py      # stage 1: README to artifact_plan.json
+├── generator.py      # stage 2: plan + guidance to oracles/
 ├── validator.py      # stage 3: validates plan and oracle package
 ├── policies.py       # tool/path restrictions for the Claude agent
 ├── run_docker.py     # thin Docker wrapper (create, copy in, run, copy out)
-├── case_builder.py   # assembles an AEBench case bundle from _agent_eval/
+├── case_builder.py   # assembles an AEBench case bundle from oracles/
 ├── utils.py          # EvalSpec, JSON/text helpers, budget tracking, logging
-└── ui.py             # Rich console output (banners, colored messages)
+└── dashboard.py      # Rich console output (banners, colored messages)
 
 tests/
 ├── unit/             # pure logic, no network or Docker
@@ -70,7 +93,7 @@ tests/
 When running locally, the CLI resolves guidance paths from three sources (in priority order):
 1. Explicit CLI flags (`--howto-path`, `--oracle-primitives-dir`, `--oracle-examples-dir`)
 2. `--guidance-dir` (auto-discovers `howtos/`, `primitives/`, `examples/` subdirectories)
-3. `benchconductor.toml` `[guidance]` section (if present)
+3. `aebenchmate.toml` `[guidance]` section (if present)
 
 ## 4. Running locally
 
@@ -132,7 +155,7 @@ uv run python -u src/cli.py pipeline \
   --verbose
 ```
 
-The pipeline runs extract → validate plan → generate → validate oracle, with automatic retries (controlled by `--max-repairs`) on validation failures. Each retry writes a feedback file so the next attempt knows what went wrong.
+The pipeline first runs extract, then validate plan, then generate, then validate oracle, with automatic retries (controlled by `--max-repairs`) on validation failures. Each retry writes a feedback file so the next attempt knows what went wrong.
 
 ## 5. Running in Docker
 
@@ -167,7 +190,7 @@ A normal pipeline run produces:
 workspace/asplos25_golf/
 ├── golftool/
 ├── artifact_plan.json
-├── _agent_eval/
+├── oracles/
 │   ├── env_setup.py
 │   ├── artifact_build.py
 │   ├── benchmark_prep.py
@@ -182,14 +205,14 @@ workspace/asplos25_golf/
         ├── artifact_plan.json
         ├── oracle_plan.json
         ├── .claude/
-        └── _agent_eval_full/
+        └── oracles_full/
 ```
 
-`_agent_eval/` is the clean deliverable — the four oracle modules plus optional ref files. `_agent_internals/` is for debugging and contains the raw agent output, logs, and intermediate files.
+`oracles/` is the clean deliverable — the four oracle modules plus optional ref files. `_agent_internals/` is for debugging and contains the raw agent output, logs, and intermediate files.
 
 ### Building a case bundle
 
-After a successful pipeline run, users can assemble an AEBench case bundle:
+After a successful pipeline run, the `--case-dir` flag assembles an AEBench-ready case bundle:
 
 ```bash
 uv run python -u src/cli.py pipeline \
@@ -200,13 +223,28 @@ uv run python -u src/cli.py pipeline \
   --case-dir /path/to/cases/venue24_paper
 ```
 
-This copies the oracle files and refs into the case directory and generates `case.toml`.
+This copies the oracle modules into `oracles/`, the ref files into `refs/`, and generates a `case.toml` manifest:
+
+```plaintext
+cases/venue24_paper/
+├── case.toml
+├── oracles/
+│   ├── env_setup.py
+│   ├── artifact_build.py
+│   ├── benchmark_prep.py
+│   ├── experiment_runs.py
+│   └── common.py
+└── refs/
+    └── *.json
+```
+
+Review the generated `case.toml` for TODO placeholders, add `__init__.py` files, and register the case in `cases.json` to complete integration with AEBench.
 
 ## 7. Policy enforcement
 
 The generator runs Claude with restricted permissions to prevent unintended side effects:
 
-- The agent can only write under `_agent_eval/` and `.claude/`
+- The agent can only write under `oracles/` and `.claude/`
 - Artifact source files are read-only
 - Dangerous bash commands are blocked (`rm -rf`, `curl | bash`, `sudo`, etc.)
 - Secret files (`.env`, `credentials.json`) cannot be read
@@ -264,8 +302,8 @@ uv run python -m pytest tests/functional/
 ### What is not tested
 
 - **Claude SDK calls** (`extract_artifact_plan`, `generate`): needs an API key and costs money
-- **Docker container lifecycle** (`run_docker.py`): needs a Docker daemon. Spec validation and helpers are tested; the subprocess plumbing isnt
-- **Console output** (`ui.py`): display-only, no testable logic
+- **Docker container lifecycle** (`run_docker.py`): needs a Docker daemon. Spec validation and helpers are tested; the subprocess plumbing is not
+- **Console output** (`dashboard.py`): display-only, no testable logic
 
 ### Running a single test
 
@@ -282,8 +320,8 @@ Check `_agent_internals/<run_id>/` first. It contains:
 - `docker_exec.log` — full stdout/stderr from the container
 - `pipeline_report.json` — structured report with status and cost
 - `artifact_plan.json` — what the extractor produced
-- `oracle_plan.json` — the generators reasoning about oracle structure
-- `_agent_eval_full/` — raw agent output before cleanup
+- `oracle_plan.json` — the generator's reasoning about oracle structure
+- `oracles_full/` — raw agent output before cleanup
 - `.claude/` — Claude SDK state (settings, CLAUDE.md)
 
 > [!NOTE]
@@ -292,5 +330,5 @@ Check `_agent_internals/<run_id>/` first. It contains:
 ## 10. Known limitations
 
 - The extractor does not run any commands or fetch from the network. It relies entirely on the README text, which means artifacts with incomplete or misleading READMEs may produce poor plans.
-- The generator writes oracle code but does not execute it. Validation checks syntax and structure but cant verify runtime correctness without actually running the oracles against a real workspace.
+- The generator writes oracle code but does not execute it. Validation checks syntax and structure but can't verify runtime correctness without actually running the oracles against a real workspace.
 - Retry feedback is written to the artifact directory by default. In AEBench-integrated Docker runs where the artifact checkout is mounted read-only, retries may fail. Use `--case-dir` to route outputs to a writable location.

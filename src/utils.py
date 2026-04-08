@@ -42,7 +42,7 @@ class EvalSpec:
     example_oracle_dirs: tuple[Path, ...] = ()
     primitives_dir: Path | None = None
     examples_dir: Path | None = None
-    output_dir_name: str = "_agent_eval"
+    output_dir_name: str = "oracles"
     output_base_dir: Path | None = None
     max_turns: int = 80
     max_repairs: int = 2

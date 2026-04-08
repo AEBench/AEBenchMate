@@ -10,14 +10,14 @@ from utils import EvalSpec, budget_exhausted, add_cost, strip_code_fences
 
 def test_spec_output_dir_default(tmp_path: Path) -> None:
     spec = EvalSpec(artifact_id="x", artifact_dir=tmp_path)
-    assert spec.output_dir == tmp_path / "_agent_eval"
+    assert spec.output_dir == tmp_path / "oracles"
 
 
 def test_spec_output_dir_with_base(tmp_path: Path) -> None:
     base = tmp_path / "case_bundle"
     base.mkdir()
     spec = EvalSpec(artifact_id="x", artifact_dir=tmp_path, output_base_dir=base)
-    assert spec.output_dir == base / "_agent_eval"
+    assert spec.output_dir == base / "oracles"
 
 
 def test_spec_resolved_makes_paths_absolute(tmp_path: Path) -> None:

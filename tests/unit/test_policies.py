@@ -143,21 +143,21 @@ def test_bash_sudo_denied() -> None:
 
 def test_write_inside_output_dir() -> None:
     artifact = Path("/project")
-    output = Path("/project/_agent_eval")
+    output = Path("/project/oracles")
     claude = Path("/project/.claude")
     result = _check_write_permission(
         artifact_dir=artifact,
         output_dir=output,
         claude_dir=claude,
         tool_name="Write",
-        input_data={"file_path": "/project/_agent_eval/env_setup.py"},
+        input_data={"file_path": "/project/oracles/env_setup.py"},
     )
     assert isinstance(result, PermissionResultAllow)
 
 
 def test_write_inside_claude_dir() -> None:
     artifact = Path("/project")
-    output = Path("/project/_agent_eval")
+    output = Path("/project/oracles")
     claude = Path("/project/.claude")
     result = _check_write_permission(
         artifact_dir=artifact,
@@ -171,7 +171,7 @@ def test_write_inside_claude_dir() -> None:
 
 def test_write_outside_allowed_denied() -> None:
     artifact = Path("/project")
-    output = Path("/project/_agent_eval")
+    output = Path("/project/oracles")
     claude = Path("/project/.claude")
     result = _check_write_permission(
         artifact_dir=artifact,
@@ -185,7 +185,7 @@ def test_write_outside_allowed_denied() -> None:
 
 def test_write_no_file_path_denied() -> None:
     artifact = Path("/project")
-    output = Path("/project/_agent_eval")
+    output = Path("/project/oracles")
     claude = Path("/project/.claude")
     result = _check_write_permission(
         artifact_dir=artifact,
@@ -199,7 +199,7 @@ def test_write_no_file_path_denied() -> None:
 
 def test_read_normal_file() -> None:
     artifact = Path("/project")
-    output = Path("/project/_agent_eval")
+    output = Path("/project/oracles")
     claude = Path("/project/.claude")
     result = _check_read_permission(
         artifact_dir=artifact,
@@ -212,7 +212,7 @@ def test_read_normal_file() -> None:
 
 def test_read_secret_denied() -> None:
     artifact = Path("/project")
-    output = Path("/project/_agent_eval")
+    output = Path("/project/oracles")
     claude = Path("/project/.claude")
     result = _check_read_permission(
         artifact_dir=artifact,
@@ -225,7 +225,7 @@ def test_read_secret_denied() -> None:
 
 def test_read_source_code_dir_denied() -> None:
     artifact = Path("/project")
-    output = Path("/project/_agent_eval")
+    output = Path("/project/oracles")
     claude = Path("/project/.claude")
     result = _check_read_permission(
         artifact_dir=artifact,
@@ -238,7 +238,7 @@ def test_read_source_code_dir_denied() -> None:
 
 def test_read_no_path_allowed() -> None:
     artifact = Path("/project")
-    output = Path("/project/_agent_eval")
+    output = Path("/project/oracles")
     claude = Path("/project/.claude")
     result = _check_read_permission(
         artifact_dir=artifact,

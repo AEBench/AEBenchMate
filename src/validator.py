@@ -14,7 +14,7 @@ from utils import read_json_if_exists, write_json_file
 
 logger = logging.getLogger("validator")
 
-AGENT_EVAL = "_agent_eval"
+ORACLES_DIR = "oracles"
 
 REQUIRED_ORACLE_FILES = {
     "env_setup.py": "OracleEnvSetup",
@@ -62,20 +62,20 @@ def _report_dict(report: ValidationReport) -> dict[str, Any]:
 
 
 def validate(root: Path) -> ValidationReport:
-    """Check _agent_eval/ under root for required files, AST issues, plan coverage."""
+    """Check oracles/ under root for required files, AST issues, plan coverage."""
     root = root.resolve()
     issues: list[ValidationIssue] = []
 
     for name in REQUIRED_ORACLE_FILES:
-        p = root / AGENT_EVAL / name
+        p = root / ORACLES_DIR / name
         if not p.exists():
             issues.append(ValidationIssue(code="missing_file", severity="error", path=p, message="required file missing"))
 
-    plan_path = root / AGENT_EVAL / "oracle_plan.json"
+    plan_path = root / ORACLES_DIR / "oracle_plan.json"
     if not plan_path.exists():
         issues.append(ValidationIssue(code="missing_plan", severity="warning", path=plan_path, message="oracle_plan.json missing"))
 
-    eval_dir = root / AGENT_EVAL
+    eval_dir = root / ORACLES_DIR
     if eval_dir.is_dir():
         for path in sorted(eval_dir.glob("*.py")):
             issues.extend(_check_python_file(path))
@@ -148,7 +148,7 @@ def create_missing_refs(root: Path) -> list[Path]:
     """Write missing ref files using oracle_plan.json templates."""
     root = root.resolve()
     try:
-        plan = read_json_if_exists(root / AGENT_EVAL / "oracle_plan.json")
+        plan = read_json_if_exists(root / ORACLES_DIR / "oracle_plan.json")
     except Exception:
         return []
 
@@ -210,7 +210,7 @@ def _check_python_file(path: Path) -> list[ValidationIssue]:
 
 
 def _check_main_contract(root: Path) -> list[ValidationIssue]:
-    path = root / AGENT_EVAL / "main.py"
+    path = root / ORACLES_DIR / "main.py"
     if not path.exists():
         return []
 
@@ -236,7 +236,7 @@ def _check_main_contract(root: Path) -> list[ValidationIssue]:
 
 
 def _check_oracle_plan(root: Path) -> list[ValidationIssue]:
-    path = root / AGENT_EVAL / "oracle_plan.json"
+    path = root / ORACLES_DIR / "oracle_plan.json"
     if not path.exists():
         return []
 
@@ -296,7 +296,7 @@ def _check_plan_coverage(root: Path) -> list[ValidationIssue]:
         return []
 
     try:
-        oracle_plan = read_json_if_exists(root / AGENT_EVAL / "oracle_plan.json")
+        oracle_plan = read_json_if_exists(root / ORACLES_DIR / "oracle_plan.json")
     except Exception:
         oracle_plan = {}
     if not isinstance(oracle_plan, dict):
@@ -306,7 +306,7 @@ def _check_plan_coverage(root: Path) -> list[ValidationIssue]:
     accounted = _collect_ids(oracle_plan.get("step_coverage"), prefixes) | _collect_ids(oracle_plan.get("step_gaps"), prefixes)
 
     issues: list[ValidationIssue] = []
-    oracle_plan_path = root / AGENT_EVAL / "oracle_plan.json"
+    oracle_plan_path = root / ORACLES_DIR / "oracle_plan.json"
     for item in required:
         stage_name, item_id, kind, name = item.stage_name, item.item_id, item.kind, item.name
         if item_id not in accounted:
@@ -393,7 +393,7 @@ def _get_call_name(node: ast.AST) -> str:
 
 
 def _extract_ref_paths(root: Path) -> list[Path]:
-    path = root / AGENT_EVAL / "main.py"
+    path = root / ORACLES_DIR / "main.py"
     if not path.exists():
         return []
     try:
@@ -415,5 +415,5 @@ def _extract_ref_paths(root: Path) -> list[Path]:
                 if "refs" in parts:
                     for p in parts:
                         if p.endswith(".json"):
-                            results.add(root / AGENT_EVAL / "refs" / Path(p).name)
+                            results.add(root / ORACLES_DIR / "refs" / Path(p).name)
     return sorted(results)

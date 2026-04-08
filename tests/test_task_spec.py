@@ -22,7 +22,7 @@ def test_task_spec_defaults(tmp_path: Path) -> None:
         artifact_readme=tmp_path / "README.md",
         howto_path=tmp_path / "howto",
     )
-    assert task.output_dir_name == "_agent_eval"
+    assert task.output_dir_name == "oracles"
     assert task.max_turns == 80
     assert task.max_repairs == 2
     assert task.max_budget_usd == 1.0

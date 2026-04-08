@@ -247,9 +247,9 @@ def _build_prompt(
                 "5. Use the artifact plan as the primary structured checklist.",
                 "6. Read the artifact README only after that, as fallback augmentation.",
                 "7. Do not proactively inspect artifact source code trees; only inspect named non-source files or paths when needed to confirm a planned step.",
-                "8. Write _agent_eval/oracle_plan.json before or alongside code generation.",
+                "8. Write oracles/oracle_plan.json before or alongside code generation.",
                 "9. Generate the artifact-specific evaluator files.",
-                "10. Run a lightweight self-check: python -m py_compile _agent_eval/env_setup.py _agent_eval/artifact_build.py _agent_eval/benchmark_prep.py _agent_eval/experiment_runs.py.",
+                "10. Run a lightweight self-check: python -m py_compile oracles/env_setup.py oracles/artifact_build.py oracles/benchmark_prep.py oracles/experiment_runs.py.",
             ]
         )
     else:
@@ -257,9 +257,9 @@ def _build_prompt(
             [
                 "4. Read the artifact README after that.",
                 "5. Do not proactively inspect artifact source code trees; only inspect named non-source files or paths when needed to confirm a planned step.",
-                "6. Write _agent_eval/oracle_plan.json before or alongside code generation.",
+                "6. Write oracles/oracle_plan.json before or alongside code generation.",
                 "7. Generate the artifact-specific evaluator files.",
-                "8. Run a lightweight self-check: python -m py_compile _agent_eval/env_setup.py _agent_eval/artifact_build.py _agent_eval/benchmark_prep.py _agent_eval/experiment_runs.py.",
+                "8. Run a lightweight self-check: python -m py_compile oracles/env_setup.py oracles/artifact_build.py oracles/benchmark_prep.py oracles/experiment_runs.py.",
             ]
         )
 
@@ -267,13 +267,13 @@ def _build_prompt(
         [
             "",
             "Required outputs (AEBench oracle layout):",
-            "- _agent_eval/env_setup.py        (class OracleEnvSetup(CaseOracleEnvSetupBase))",
-            "- _agent_eval/artifact_build.py   (class OracleArtifactBuild(CaseOracleArtifactBuildBase))",
-            "- _agent_eval/benchmark_prep.py   (class OracleBenchmarkPrep(CaseOracleBenchmarkPrepBase))",
-            "- _agent_eval/experiment_runs.py  (class OracleExperimentRuns(CaseOracleExperimentRunsBase))",
-            "- _agent_eval/common.py           (shared helpers \u2014 not a phase class)",
-            "- _agent_eval/oracle_plan.json",
-            "- _agent_eval/refs/*.json only when the checks actually need them",
+            "- oracles/env_setup.py        (class OracleEnvSetup(CaseOracleEnvSetupBase))",
+            "- oracles/artifact_build.py   (class OracleArtifactBuild(CaseOracleArtifactBuildBase))",
+            "- oracles/benchmark_prep.py   (class OracleBenchmarkPrep(CaseOracleBenchmarkPrepBase))",
+            "- oracles/experiment_runs.py  (class OracleExperimentRuns(CaseOracleExperimentRunsBase))",
+            "- oracles/common.py           (shared helpers -- not a phase class)",
+            "- oracles/oracle_plan.json",
+            "- oracles/refs/*.json only when the checks actually need them",
             "",
             "oracle_plan.json must include:",
             "- howto_rules",
@@ -312,7 +312,7 @@ def _build_prompt(
             "- Any use of subprocess.run, subprocess.check_call, or subprocess.check_output must include an explicit timeout=... argument.",
             "- Before finishing, verify that no generated oracle contains an unbounded subprocess call.",
             "- Do not modify artifact source files.",
-            "- Keep writes inside _agent_eval/ only (oracle_plan.json and oracle code go there; case.toml is assembled by the authoring pipeline after this stage).",
+            "- Keep writes inside oracles/ only (oracle_plan.json and oracle code go there; case.toml is assembled by the authoring pipeline after this stage).",
             "- Use refs JSON files only when they are referenced by the checks.",
             "",
         ]

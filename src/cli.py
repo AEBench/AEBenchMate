@@ -56,7 +56,7 @@ def _add_shared_args(parser: argparse.ArgumentParser) -> None:
                         help="Path to oracle building-block modules.")
     parser.add_argument("--oracle-examples-dir",
                         help="Path to example oracle cases.")
-    parser.add_argument("--output-dir-name", default="_agent_eval")
+    parser.add_argument("--output-dir-name", default="oracles")
     parser.add_argument("--max-turns", type=int, default=80)
     parser.add_argument("--max-repairs", type=int, default=2)
     parser.add_argument("--max-budget-usd", type=float, default=1.0)
@@ -383,10 +383,10 @@ def _run_build_case_bundle(
     upstream_url: str,
     upstream_ref: str,
 ) -> dict[str, Any]:
-    """Build case bundle from _agent_eval/ output."""
+    """Build case bundle from oracles/ output."""
     print_stage_header("case bundle", spec.artifact_id)
 
-    agent_eval_dir = spec.output_dir
+    oracles_dir = spec.output_dir
 
     readme_path_in_artifact = "README.md"
     if spec.artifact_readme is not None:
@@ -402,13 +402,13 @@ def _run_build_case_bundle(
         readme_path_in_artifact=readme_path_in_artifact,
     )
     written = build_case_bundle(
-        agent_eval_dir=agent_eval_dir,
+        oracles_dir=oracles_dir,
         case_dir=case_dir,
         case_toml_content=toml_content,
     )
     print_success(f"case bundle written to {case_dir} ({len(written)} files)")
     print_info("Next steps:")
-    print_info("  1. Review oracle/ files and fill in TODOs in case.toml")
+    print_info("  1. Review oracles/ files and fill in TODOs in case.toml")
     print_info("  2. Add ref data to refs/ if needed")
     print_info("  3. Register the case in cases.json")
     return {"case_dir": str(case_dir), "files_written": written}
@@ -578,7 +578,7 @@ def main(argv: list[str] | None = None) -> int:
                 upstream_ref=getattr(args, "upstream_ref", "") or "",
             )
         elif case_dir_arg and not payload["ok"]:
-            print_warning("pipeline did not succeed — skipping case bundle assembly")
+            print_warning("pipeline did not succeed -- skipping case bundle assembly")
 
         if case_bundle_payload is not None:
             payload["case_bundle"] = case_bundle_payload

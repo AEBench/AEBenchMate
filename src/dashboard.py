@@ -131,7 +131,7 @@ def print_footer_mode(mode_text: str) -> None:
 
 def print_paths_summary(
     *,
-    clean_agent_eval_dir: Path | None = None,
+    clean_oracles_dir: Path | None = None,
     internals_dir: Path | None = None,
     report_path: Path | None = None,
 ) -> None:
@@ -139,8 +139,8 @@ def print_paths_summary(
     table.add_column("Key", style="cyan", no_wrap=True)
     table.add_column("Value", style="white")
 
-    if clean_agent_eval_dir is not None:
-        table.add_row("_agent_eval", clean_agent_eval_dir.as_posix())
+    if clean_oracles_dir is not None:
+        table.add_row("oracles", clean_oracles_dir.as_posix())
     if internals_dir is not None:
         table.add_row("_agent_internals", internals_dir.as_posix())
     if report_path is not None:

@@ -78,7 +78,7 @@ def write_case_toml(
 
 def build_case_bundle(
     *,
-    agent_eval_dir: Path,
+    oracles_dir: Path,
     case_dir: Path,
     case_toml_content: str,
 ) -> list[str]:
@@ -92,17 +92,17 @@ def build_case_bundle(
     written.append(str(toml_path))
     logger.info("wrote %s", toml_path)
 
-    oracle_dir = case_dir / "oracle"
-    oracle_dir.mkdir(parents=True, exist_ok=True)
+    oracles_dest = case_dir / "oracles"
+    oracles_dest.mkdir(parents=True, exist_ok=True)
     for name in _ORACLE_FILES:
-        src = agent_eval_dir / name
+        src = oracles_dir / name
         if src.is_file():
-            dest = oracle_dir / name
+            dest = oracles_dest / name
             dest.write_bytes(src.read_bytes())
             written.append(str(dest))
-            logger.info("copied %s -> oracle/%s", name, name)
+            logger.info("copied %s -> oracles/%s", name, name)
 
-    refs_src = agent_eval_dir / "refs"
+    refs_src = oracles_dir / "refs"
     if refs_src.is_dir():
         refs_dest = case_dir / "refs"
         refs_dest.mkdir(parents=True, exist_ok=True)

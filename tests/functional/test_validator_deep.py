@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from validator import validate, validate_artifact_plan, create_missing_refs, AGENT_EVAL
+from validator import validate, validate_artifact_plan, create_missing_refs, ORACLES_DIR
 
 
 def _write(path: Path, content: str) -> None:
@@ -19,7 +19,7 @@ def _write_json(path: Path, payload) -> None:
 
 
 def _scaffold_oracle(root: Path, extras: dict[str, str] | None = None) -> None:
-    ae = root / AGENT_EVAL
+    ae = root / ORACLES_DIR
     ae.mkdir(parents=True, exist_ok=True)
     for name, cls in [
         ("env_setup.py", "OracleEnvSetup"),
@@ -77,7 +77,7 @@ def test_validate_hardcoded_path_warning(tmp_path: Path) -> None:
 
 def test_validate_valid_oracle_all_phases_passes(tmp_path: Path) -> None:
     _scaffold_oracle(tmp_path)
-    _write_json(tmp_path / AGENT_EVAL / "oracle_plan.json", {
+    _write_json(tmp_path / ORACLES_DIR / "oracle_plan.json", {
         "howto_rules": [],
         "example_patterns": [],
         "borrowed_structure": [],
@@ -195,7 +195,7 @@ def test_validate_artifact_plan_zero_items_still_valid(tmp_path: Path) -> None:
 
 
 def test_create_missing_refs_from_oracle_plan(tmp_path: Path) -> None:
-    ae = tmp_path / AGENT_EVAL
+    ae = tmp_path / ORACLES_DIR
     ae.mkdir(parents=True, exist_ok=True)
 
     _write_json(ae / "oracle_plan.json", {
@@ -224,7 +224,7 @@ def test_create_missing_refs_from_oracle_plan(tmp_path: Path) -> None:
 
 
 def test_create_missing_refs_skips_existing(tmp_path: Path) -> None:
-    ae = tmp_path / AGENT_EVAL
+    ae = tmp_path / ORACLES_DIR
     refs_dir = ae / "refs"
     refs_dir.mkdir(parents=True, exist_ok=True)
     _write_json(refs_dir / "data.json", {"already": "here"})

@@ -15,8 +15,8 @@ def _write(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
-def _setup_agent_eval(root: Path) -> Path:
-    d = root / "_agent_eval"
+def _setup_oracles(root: Path) -> Path:
+    d = root / "oracles"
     for name in ("env_setup.py", "artifact_build.py", "benchmark_prep.py", "experiment_runs.py"):
         _write(d / name, f"# {name}\n")
     _write(d / "common.py", "# shared\n")
@@ -49,22 +49,22 @@ def test_toml_escapes_quotes() -> None:
 
 
 def test_bundle_copies_oracle_files(tmp_path: Path) -> None:
-    agent_eval = _setup_agent_eval(tmp_path)
+    oracles_src = _setup_oracles(tmp_path)
     case_dir = tmp_path / "case_out"
     toml = write_case_toml(case_id="test")
-    build_case_bundle(agent_eval_dir=agent_eval, case_dir=case_dir, case_toml_content=toml)
+    build_case_bundle(oracles_dir=oracles_src, case_dir=case_dir, case_toml_content=toml)
 
     assert (case_dir / "case.toml").is_file()
-    assert (case_dir / "oracle" / "env_setup.py").is_file()
-    assert (case_dir / "oracle" / "artifact_build.py").is_file()
-    assert (case_dir / "oracle" / "common.py").is_file()
+    assert (case_dir / "oracles" / "env_setup.py").is_file()
+    assert (case_dir / "oracles" / "artifact_build.py").is_file()
+    assert (case_dir / "oracles" / "common.py").is_file()
 
 
 def test_bundle_copies_refs(tmp_path: Path) -> None:
-    agent_eval = _setup_agent_eval(tmp_path)
+    oracles_src = _setup_oracles(tmp_path)
     case_dir = tmp_path / "case_out"
     toml = write_case_toml(case_id="test")
-    build_case_bundle(agent_eval_dir=agent_eval, case_dir=case_dir, case_toml_content=toml)
+    build_case_bundle(oracles_dir=oracles_src, case_dir=case_dir, case_toml_content=toml)
 
     ref = case_dir / "refs" / "data.ref.json"
     assert ref.is_file()
@@ -72,9 +72,9 @@ def test_bundle_copies_refs(tmp_path: Path) -> None:
 
 
 def test_bundle_skips_missing_common(tmp_path: Path) -> None:
-    agent_eval = _setup_agent_eval(tmp_path)
-    (agent_eval / "common.py").unlink()
+    oracles_src = _setup_oracles(tmp_path)
+    (oracles_src / "common.py").unlink()
     case_dir = tmp_path / "case_out"
     toml = write_case_toml(case_id="test")
-    written = build_case_bundle(agent_eval_dir=agent_eval, case_dir=case_dir, case_toml_content=toml)
+    written = build_case_bundle(oracles_dir=oracles_src, case_dir=case_dir, case_toml_content=toml)
     assert not any("common.py" in w for w in written)

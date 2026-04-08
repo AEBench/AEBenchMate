@@ -65,7 +65,7 @@ class DockerResult:
     container_id: str
     run_id: str
     run_dir: Path
-    output_agent_eval_dir: Path
+    output_oracles_dir: Path
     internals_dir: Path
     report_path: Path
     exit_code: int
@@ -82,12 +82,12 @@ def run(spec: DockerArgs) -> DockerResult:
     validate_spec(spec)
     ensure_image(spec)
 
-    output_agent_eval_dir = spec.workspace_dir / "_agent_eval"
-    if output_agent_eval_dir.exists():
+    output_oracles_dir = spec.workspace_dir / "oracles"
+    if output_oracles_dir.exists():
         if spec.overwrite_host_output:
-            shutil.rmtree(output_agent_eval_dir)
+            shutil.rmtree(output_oracles_dir)
         else:
-            raise FileExistsError(f"Host output already exists: {output_agent_eval_dir}")
+            raise FileExistsError(f"Host output already exists: {output_oracles_dir}")
 
     run_id = make_run_id()
     internals_root = spec.internals_dir
@@ -172,16 +172,16 @@ def run(spec: DockerArgs) -> DockerResult:
             spec=spec,
             container_name=container_name,
             run_dir=run_dir,
-            output_agent_eval_dir=output_agent_eval_dir,
+            output_oracles_dir=output_oracles_dir,
         )
-        
+
         cost_usd = read_cost_from_report(report_path, spec.stage)
         state["cost_usd"] = cost_usd
 
         state["status"] = "completed" if exit_code == 0 else "failed"
         state["exit_code"] = exit_code
         state["report_path"] = report_path.as_posix()
-        state["output_agent_eval_dir"] = output_agent_eval_dir.as_posix()
+        state["output_oracles_dir"] = output_oracles_dir.as_posix()
         state["internals_dir"] = run_dir.as_posix()
         write_json_file(metadata_path, state, indent=2, sort_keys=True)
 
@@ -196,7 +196,7 @@ def run(spec: DockerArgs) -> DockerResult:
             write_json_file(metadata_path, state, indent=2, sort_keys=True)
 
     print_paths_summary(
-        clean_agent_eval_dir=output_agent_eval_dir,
+        clean_oracles_dir=output_oracles_dir,
         internals_dir=run_dir,
         report_path=report_path,
     )
@@ -210,7 +210,7 @@ def run(spec: DockerArgs) -> DockerResult:
         container_id=container_id,
         run_id=run_id,
         run_dir=run_dir,
-        output_agent_eval_dir=output_agent_eval_dir,
+        output_oracles_dir=output_oracles_dir,
         internals_dir=run_dir,
         report_path=report_path,
         exit_code=exit_code,
@@ -390,7 +390,7 @@ def prepare_container_dirs(spec: DockerArgs, container_name: str) -> None:
                 _GUIDANCE_DIR
                 / "examples"
                 / path.parent.name
-                / "_agent_eval"
+                / "oracles"
             ).as_posix()
         )
 
@@ -448,7 +448,7 @@ def copy_inputs(spec: DockerArgs, container_name: str) -> None:
             _GUIDANCE_DIR
             / "examples"
             / path.parent.name
-            / "_agent_eval"
+            / "oracles"
         )
         docker_cp_dir(spec, path, f"{container_name}:{dest.as_posix()}")
 
@@ -479,12 +479,12 @@ def copy_inputs(spec: DockerArgs, container_name: str) -> None:
             f"{container_name}:{(_ARTIFACT_DIR / 'artifact_plan.json').as_posix()}",
         )
 
-    host_output_agent_eval_dir = spec.workspace_dir / "_agent_eval"
-    if spec.stage == "validate" and host_output_agent_eval_dir.is_dir():
+    host_output_oracles_dir = spec.workspace_dir / "oracles"
+    if spec.stage == "validate" and host_output_oracles_dir.is_dir():
         docker_cp_dir(
             spec,
-            host_output_agent_eval_dir,
-            f"{container_name}:{(_ARTIFACT_DIR / '_agent_eval').as_posix()}",
+            host_output_oracles_dir,
+            f"{container_name}:{(_ARTIFACT_DIR / 'oracles').as_posix()}",
         )
 
 
@@ -532,7 +532,7 @@ def run_stage_in_container(
 
         # Kill the process after the timeout so this never hangs indefinitely.
         def _timeout_kill() -> None:
-            logger.warning("docker exec timed out after %.0fs — killing", _DOCKER_EXEC_TIMEOUT_S)
+            logger.warning("docker exec timed out after %.0fs -- killing", _DOCKER_EXEC_TIMEOUT_S)
             proc.kill()
 
         timer = threading.Timer(_DOCKER_EXEC_TIMEOUT_S, _timeout_kill)
@@ -617,7 +617,7 @@ def build_container_cli_argv(spec: DockerArgs) -> list[str]:
                     _GUIDANCE_DIR
                     / "examples"
                     / path.parent.name
-                    / "_agent_eval"
+                    / "oracles"
                 ).as_posix(),
             ]
         )
@@ -632,24 +632,24 @@ def export_outputs(
     spec: DockerArgs,
     container_name: str,
     run_dir: Path,
-    output_agent_eval_dir: Path,
+    output_oracles_dir: Path,
 ) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    full_agent_eval_dir = run_dir / "_agent_eval_full"
+    full_oracles_dir = run_dir / "oracles_full"
     artifact_plan_path = run_dir / "artifact_plan.json"
     report_path = run_dir / f"{spec.stage}_report.json"
     claude_dir = run_dir / ".claude"
 
-    if full_agent_eval_dir.exists():
-        shutil.rmtree(full_agent_eval_dir)
+    if full_oracles_dir.exists():
+        shutil.rmtree(full_oracles_dir)
     if claude_dir.exists():
         shutil.rmtree(claude_dir)
 
     try_docker_cp_from_container(
         spec,
-        f"{container_name}:{(_ARTIFACT_DIR / '_agent_eval').as_posix()}",
-        full_agent_eval_dir,
+        f"{container_name}:{(_ARTIFACT_DIR / 'oracles').as_posix()}",
+        full_oracles_dir,
     )
     try_docker_cp_from_container(
         spec,
@@ -667,21 +667,21 @@ def export_outputs(
         report_path,
     )
 
-    oracle_plan_src = full_agent_eval_dir / "oracle_plan.json"
+    oracle_plan_src = full_oracles_dir / "oracle_plan.json"
     oracle_plan_dest = run_dir / "oracle_plan.json"
     if oracle_plan_src.is_file():
         shutil.copy2(oracle_plan_src, oracle_plan_dest)
 
-    if full_agent_eval_dir.is_dir():
+    if full_oracles_dir.is_dir():
         copy_oracle_files(
-            full_agent_eval_dir=full_agent_eval_dir,
-            output_agent_eval_dir=output_agent_eval_dir,
+            full_oracles_dir=full_oracles_dir,
+            output_oracles_dir=output_oracles_dir,
         )
 
 
 def copy_oracle_files(
-    full_agent_eval_dir: Path,
-    output_agent_eval_dir: Path,
+    full_oracles_dir: Path,
+    output_oracles_dir: Path,
 ) -> None:
     required_files = (
         "env_setup.py",
@@ -691,17 +691,17 @@ def copy_oracle_files(
         "common.py",
     )
 
-    if output_agent_eval_dir.exists():
-        shutil.rmtree(output_agent_eval_dir)
-    output_agent_eval_dir.mkdir(parents=True, exist_ok=True)
+    if output_oracles_dir.exists():
+        shutil.rmtree(output_oracles_dir)
+    output_oracles_dir.mkdir(parents=True, exist_ok=True)
 
     for name in required_files:
-        src = full_agent_eval_dir / name
+        src = full_oracles_dir / name
         if src.is_file():
-            shutil.copy2(src, output_agent_eval_dir / name)
+            shutil.copy2(src, output_oracles_dir / name)
 
-    refs_src = full_agent_eval_dir / "refs"
-    refs_dest = output_agent_eval_dir / "refs"
+    refs_src = full_oracles_dir / "refs"
+    refs_dest = output_oracles_dir / "refs"
     if refs_src.is_dir():
         shutil.copytree(refs_src, refs_dest)
 
@@ -713,7 +713,7 @@ def default_example_oracle_dirs(root: Path) -> tuple[Path, ...]:
 
     paths: list[Path] = []
     for artifact_dir in examples_root.glob("*"):
-        candidate = artifact_dir / "_agent_eval"
+        candidate = artifact_dir / "oracles"
         if candidate.is_dir():
             paths.append(candidate)
 
@@ -841,7 +841,7 @@ def spec_from_args(args: argparse.Namespace) -> DockerArgs:
         example_oracle_dirs=example_dirs,
         primitives_dir=primitives_dir,
         examples_dir=examples_dir,
-        output_dir_name="_agent_eval",
+        output_dir_name="oracles",
         max_turns=args.max_turns or int(os.environ.get("ARTIFACT_EVAL_MAX_TURNS", "80")),
         max_repairs=args.max_repairs or int(os.environ.get("ARTIFACT_EVAL_MAX_REPAIRS", "2")),
         max_budget_usd=(

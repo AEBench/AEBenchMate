@@ -33,14 +33,14 @@ GENERATOR_SYSTEM_APPEND = """
 You are an expert Python engineer generating benchmark-specific oracle code for AEBench.
 
 Hard rules:
-- Only write under _agent_eval/ and .claude/
+- Only write under oracles/ and .claude/
 - Do not modify artifact source files
 - Generate the four AEBench oracle modules with exact file and class names:
-    _agent_eval/env_setup.py        → class OracleEnvSetup(CaseOracleEnvSetupBase)
-    _agent_eval/artifact_build.py   → class OracleArtifactBuild(CaseOracleArtifactBuildBase)
-    _agent_eval/benchmark_prep.py   → class OracleBenchmarkPrep(CaseOracleBenchmarkPrepBase)
-    _agent_eval/experiment_runs.py  → class OracleExperimentRuns(CaseOracleExperimentRunsBase)
-    _agent_eval/common.py           → shared helpers (no oracle base class)
+    oracles/env_setup.py        -> class OracleEnvSetup(CaseOracleEnvSetupBase)
+    oracles/artifact_build.py   -> class OracleArtifactBuild(CaseOracleArtifactBuildBase)
+    oracles/benchmark_prep.py   -> class OracleBenchmarkPrep(CaseOracleBenchmarkPrepBase)
+    oracles/experiment_runs.py  -> class OracleExperimentRuns(CaseOracleExperimentRunsBase)
+    oracles/common.py           -> shared helpers (no oracle base class)
 - Keep every oracle non-interactive, idempotent, and time-bounded
 - Read add_case.md first, then the oracle building blocks, then the artifact evaluation plan, then the artifact README
 - Follow add_case.md conventions first
@@ -50,8 +50,8 @@ Hard rules:
 - Prefer CaseOracleXxxBase base classes and primitives from the evaluator framework
 - When exact refs values are unknown, create typed placeholders in refs JSON files
 - Use 0.0 for floats, 0 for ints, empty strings for strings, false for booleans, [] for lists, and {} for objects
-- Create _agent_eval/oracle_plan.json and include howto_rules, example_patterns, borrowed_structure, artifact_specific_adaptations, reference_templates, plan_summary, step_coverage, step_gaps, and step_augmentations
-- Before finishing, run: python -m py_compile _agent_eval/env_setup.py _agent_eval/artifact_build.py _agent_eval/benchmark_prep.py _agent_eval/experiment_runs.py
+- Create oracles/oracle_plan.json and include howto_rules, example_patterns, borrowed_structure, artifact_specific_adaptations, reference_templates, plan_summary, step_coverage, step_gaps, and step_augmentations
+- Before finishing, run: python -m py_compile oracles/env_setup.py oracles/artifact_build.py oracles/benchmark_prep.py oracles/experiment_runs.py
 """.strip()
 
 _ALLOWED_GENERATOR_TOOLS = (
@@ -392,7 +392,7 @@ def _build_claude_md(
             "- Only use the artifact README or repository to resolve ambiguity, fill gaps, or verify uncertain steps.",
             "- Do not proactively inspect artifact source code trees; only inspect named non-source files or paths when needed to confirm a planned step.",
             "- Only deviate from the examples when the artifact requires it.",
-            "- Write only under _agent_eval/ and .claude/.",
+            "- Write only under oracles/ and .claude/.",
             "- Do not modify artifact source files.",
             "- Keep all oracles non-interactive, idempotent, and time-bounded.",
             "- Any use of subprocess.run, subprocess.check_call, or subprocess.check_output must include an explicit timeout=... argument.",
@@ -402,7 +402,7 @@ def _build_claude_md(
             "- If exact refs values are unknown, preserve the schema and use typed placeholders.",
             '- Use 0.0 for floats, 0 for ints, "" for strings, false for booleans, [] for lists, and {} for objects.',
             "",
-            "Create _agent_eval/oracle_plan.json with:",
+            "Create oracles/oracle_plan.json with:",
             "- howto_rules",
             "- example_patterns",
             "- borrowed_structure",
