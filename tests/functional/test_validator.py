@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from validator import validate, validate_artifact_plan, create_missing_refs, ORACLES_DIR
+from validator import validate, validate_artifact_plan, ORACLES_DIR
 
 
 def _write(path: Path, content: str) -> None:
@@ -18,7 +18,7 @@ def _write_json(path: Path, payload) -> None:
     path.write_text(json.dumps(payload), "utf-8")
 
 
-def _scaffold_oracle(root: Path, extras: dict[str, str] | None = None) -> None:
+def _template_oracle(root: Path, extras: dict[str, str] | None = None) -> None:
     ae = root / ORACLES_DIR
     ae.mkdir(parents=True, exist_ok=True)
     for name, cls in [
@@ -35,7 +35,7 @@ def _scaffold_oracle(root: Path, extras: dict[str, str] | None = None) -> None:
 
 
 def test_validate_subprocess_popen_forbidden(tmp_path: Path) -> None:
-    _scaffold_oracle(tmp_path, extras={
+    _template_oracle(tmp_path, extras={
         "env_setup.py": (
             "import subprocess\n"
             "class OracleEnvSetup:\n"
@@ -49,7 +49,7 @@ def test_validate_subprocess_popen_forbidden(tmp_path: Path) -> None:
 
 
 def test_validate_os_system_forbidden(tmp_path: Path) -> None:
-    _scaffold_oracle(tmp_path, extras={
+    _template_oracle(tmp_path, extras={
         "env_setup.py": (
             "import os\n"
             "class OracleEnvSetup:\n"
@@ -63,7 +63,7 @@ def test_validate_os_system_forbidden(tmp_path: Path) -> None:
 
 
 def test_validate_hardcoded_path_warning(tmp_path: Path) -> None:
-    _scaffold_oracle(tmp_path, extras={
+    _template_oracle(tmp_path, extras={
         "env_setup.py": (
             "class OracleEnvSetup:\n"
             "    PATH = '/home/user/data'\n"
@@ -76,7 +76,7 @@ def test_validate_hardcoded_path_warning(tmp_path: Path) -> None:
 
 
 def test_validate_valid_oracle_all_phases_passes(tmp_path: Path) -> None:
-    _scaffold_oracle(tmp_path)
+    _template_oracle(tmp_path)
     _write_json(tmp_path / ORACLES_DIR / "oracle_plan.json", {
         "howto_rules": [],
         "example_patterns": [],
@@ -194,59 +194,3 @@ def test_validate_artifact_plan_zero_items_still_valid(tmp_path: Path) -> None:
     assert report.ok is True
 
 
-def test_create_missing_refs_from_oracle_plan(tmp_path: Path) -> None:
-    ae = tmp_path / ORACLES_DIR
-    ae.mkdir(parents=True, exist_ok=True)
-
-    _write_json(ae / "oracle_plan.json", {
-        "reference_templates": {
-            "data.json": {"key": "value"},
-            "metrics.json": {"score": 0},
-        },
-    })
-    _write(ae / "main.py", (
-        "from entry import EntryConfig\n"
-        "import os\n"
-        "def main(argv):\n"
-        "    cfg = EntryConfig(\n"
-        "        ground_truth_paths={'data': os.path.join('refs', 'data.json'),\n"
-        "                            'metrics': os.path.join('refs', 'metrics.json')}\n"
-        "    )\n"
-        "    return cfg\n"
-    ))
-    created = create_missing_refs(tmp_path)
-    names = {p.name for p in created}
-    assert "data.json" in names
-    assert "metrics.json" in names
-    assert (ae / "refs" / "data.json").exists()
-    data = json.loads((ae / "refs" / "data.json").read_text())
-    assert data == {"key": "value"}
-
-
-def test_create_missing_refs_skips_existing(tmp_path: Path) -> None:
-    ae = tmp_path / ORACLES_DIR
-    refs_dir = ae / "refs"
-    refs_dir.mkdir(parents=True, exist_ok=True)
-    _write_json(refs_dir / "data.json", {"already": "here"})
-
-    _write_json(ae / "oracle_plan.json", {
-        "reference_templates": {
-            "data.json": {"key": "value"},
-            "other.json": {"new": True},
-        },
-    })
-    _write(ae / "main.py", (
-        "from entry import EntryConfig\n"
-        "import os\n"
-        "def main(argv):\n"
-        "    cfg = EntryConfig(\n"
-        "        ground_truth_paths={'d': os.path.join('refs', 'data.json'),\n"
-        "                            'o': os.path.join('refs', 'other.json')}\n"
-        "    )\n"
-    ))
-    created = create_missing_refs(tmp_path)
-    names = {p.name for p in created}
-    assert "data.json" not in names
-    assert "other.json" in names
-    existing = json.loads((refs_dir / "data.json").read_text())
-    assert existing == {"already": "here"}

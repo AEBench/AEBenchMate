@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from validator import validate, validate_artifact_plan, create_missing_refs
+from validator import validate, validate_artifact_plan
 
 
 
@@ -68,11 +68,6 @@ def test_validate_valid_package(tmp_path: Path) -> None:
     _setup_valid_package(tmp_path)
     report = validate(tmp_path)
     assert report.ok
-
-
-def test_validate_no_errors_means_ok(tmp_path: Path) -> None:
-    _setup_valid_package(tmp_path)
-    report = validate(tmp_path)
     assert all(i.severity != "error" for i in report.issues)
 
 
@@ -207,21 +202,3 @@ def test_plan_wrong_id_prefix(tmp_path: Path) -> None:
 
 
 
-def test_materialize_creates_missing_ref(tmp_path: Path) -> None:
-    _setup_valid_package(tmp_path)
-    _write(tmp_path / "oracles" / "main.py", textwrap.dedent("""\
-        from pathlib import Path
-        class EntryConfig:
-            def __init__(self, ground_truth_paths=None): pass
-        cfg = EntryConfig(ground_truth_paths={"key": Path("refs") / "data.json"})
-        def main(argv): pass
-        env_setup = artifact_build = benchmark_prep = experiment_runs = None
-    """))
-    _write_json(tmp_path / "oracles" / "oracle_plan.json", {
-        **{k: {} for k in _ORACLE_PLAN_KEYS},
-        "reference_templates": {"data.json": {"values": [1, 2, 3]}},
-    })
-    created = create_missing_refs(tmp_path)
-    assert len(created) == 1
-    assert created[0].name == "data.json"
-    assert json.loads(created[0].read_text()) == {"values": [1, 2, 3]}
