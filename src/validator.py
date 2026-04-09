@@ -10,7 +10,7 @@ from typing import Any, NamedTuple
 
 import logging
 
-from utils import read_json_if_exists, write_json_file
+from utils import read_json_if_exists
 
 logger = logging.getLogger("validator")
 
@@ -36,7 +36,7 @@ FORBIDDEN_CALLS = {"input", "getpass", "getpass.getpass", "os.system", "pdb.set_
 class PlanItem(NamedTuple):
     stage_name: str
     item_id: str
-    kind: str
+    category: str
     name: str
 
 
@@ -57,43 +57,31 @@ class ValidationReport:
     issues: tuple[ValidationIssue, ...]
 
 
-def _report_dict(report: ValidationReport) -> dict[str, Any]:
+def report_to_dict(report: ValidationReport) -> dict[str, Any]:
     return {"ok": report.ok, "issues": [asdict(i) for i in report.issues]}
 
 
-def validate(root: Path) -> ValidationReport:
+def validate_oracle_package(root: Path) -> ValidationReport:
     """Check oracles/ under root for required files, AST issues, plan coverage."""
     root = root.resolve()
     issues: list[ValidationIssue] = []
 
     for name in REQUIRED_ORACLE_FILES:
-        p = root / ORACLES_DIR / name
-        if not p.exists():
-            issues.append(ValidationIssue(code="missing_file", severity="error", path=p, message="required file missing"))
+        oracle_path = root / ORACLES_DIR / name
+        if not oracle_path.exists():
+            issues.append(ValidationIssue(code="missing_file", severity="error", path=oracle_path, message="required file missing"))
 
     plan_path = root / ORACLES_DIR / "oracle_plan.json"
     if not plan_path.exists():
         issues.append(ValidationIssue(code="missing_plan", severity="warning", path=plan_path, message="oracle_plan.json missing"))
 
-    eval_dir = root / ORACLES_DIR
-    if eval_dir.is_dir():
-        for path in sorted(eval_dir.glob("*.py")):
+    oracles_dir = root / ORACLES_DIR
+    if oracles_dir.is_dir():
+        for path in sorted(oracles_dir.glob("*.py")):
             issues.extend(_check_python_file(path))
 
-    issues.extend(_check_main_contract(root))
     issues.extend(_check_oracle_plan(root))
     issues.extend(_check_plan_coverage(root))
-
-    for ref_path in _extract_ref_paths(root):
-        if not ref_path.exists():
-            issues.append(ValidationIssue(code="missing_ref", severity="error", path=ref_path, message="referenced ref file missing"))
-            continue
-        try:
-            data = read_json_if_exists(ref_path)
-            if data is None:
-                issues.append(ValidationIssue(code="missing_ref", severity="error", path=ref_path, message="ref file is empty"))
-        except Exception as exc:
-            issues.append(ValidationIssue(code="invalid_ref_json", severity="error", path=ref_path, message=str(exc)))
 
     ok = not any(i.severity == "error" for i in issues)
     return ValidationReport(ok=ok, issues=tuple(issues))
@@ -144,32 +132,6 @@ def validate_artifact_plan(root_or_path: Path) -> ValidationReport:
     return ValidationReport(ok=ok, issues=tuple(issues))
 
 
-def create_missing_refs(root: Path) -> list[Path]:
-    """Write missing ref files using oracle_plan.json templates."""
-    root = root.resolve()
-    try:
-        plan = read_json_if_exists(root / ORACLES_DIR / "oracle_plan.json")
-    except Exception:
-        return []
-
-    if not isinstance(plan, dict):
-        return []
-    templates = plan.get("reference_templates")
-    if not isinstance(templates, dict):
-        return []
-
-    created: list[Path] = []
-    for ref_path in _extract_ref_paths(root):
-        if ref_path.exists():
-            continue
-        template = templates.get(ref_path.name)
-        if template is None:
-            continue
-        write_json_file(ref_path, template, indent=2, sort_keys=True)
-        created.append(ref_path)
-    return created
-
-
 def _check_python_file(path: Path) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
 
@@ -184,7 +146,6 @@ def _check_python_file(path: Path) -> list[ValidationIssue]:
     except Exception as exc:
         return [ValidationIssue(code="ast_error", severity="error", path=path, message=str(exc))]
 
-    rel = path.relative_to(path.parent.parent).as_posix()
     expected_class = REQUIRED_ORACLE_FILES.get(path.name)
     if expected_class:
         class_names = {n.name for n in ast.walk(tree) if isinstance(n, ast.ClassDef)}
@@ -195,42 +156,16 @@ def _check_python_file(path: Path) -> list[ValidationIssue]:
         if not isinstance(node, ast.Call):
             continue
         name = _get_call_name(node.func)
-        short = name.split(".")[-1]
-        if name in FORBIDDEN_CALLS or short in FORBIDDEN_CALLS:
+        base_name = name.split(".")[-1]
+        if name in FORBIDDEN_CALLS or base_name in FORBIDDEN_CALLS:
             issues.append(ValidationIssue(code="forbidden_call", severity="error", path=path, message=f"forbidden call: {name}"))
-        if name in {"subprocess.Popen", "Popen"} or short in {"Popen"}:
+        if name in {"subprocess.Popen", "Popen"} or base_name in {"Popen"}:
             issues.append(ValidationIssue(code="forbidden_popen", severity="error", path=path, message="Popen not allowed"))
 
     for pattern in (r"/home/[^/]+", r"/Users/[^/]+"):
         m = re.search(pattern, source)
         if m:
             issues.append(ValidationIssue(code="hardcoded_path", severity="warning", path=path, message=f"hardcoded path: {m.group(0)}"))
-
-    return issues
-
-
-def _check_main_contract(root: Path) -> list[ValidationIssue]:
-    path = root / ORACLES_DIR / "main.py"
-    if not path.exists():
-        return []
-
-    try:
-        source = path.read_text("utf-8")
-    except Exception as exc:
-        return [ValidationIssue(code="read_error", severity="error", path=path, message=str(exc))]
-
-    try:
-        tree = ast.parse(source, filename=str(path))
-    except Exception:
-        return []
-
-    issues: list[ValidationIssue] = []
-    if not any(isinstance(n, ast.FunctionDef) and n.name == "main" for n in ast.walk(tree)):
-        issues.append(ValidationIssue(code="missing_main", severity="error", path=path, message="must define main(argv)"))
-
-    for token in ("EntryConfig", "env_setup", "artifact_build", "benchmark_prep", "experiment_runs"):
-        if token not in source:
-            issues.append(ValidationIssue(code="main_contract", severity="error", path=path, message=f"missing token {token!r}"))
 
     return issues
 
@@ -288,7 +223,7 @@ def _check_plan_coverage(root: Path) -> list[ValidationIssue]:
                 required.append(PlanItem(
                     stage_name=stage_name,
                     item_id=item_id,
-                    kind=str(item.get("kind", "")),
+                    category=str(item.get("kind", "")),
                     name=str(item.get("name", "")),
                 ))
 
@@ -303,33 +238,32 @@ def _check_plan_coverage(root: Path) -> list[ValidationIssue]:
         oracle_plan = {}
 
     prefixes = tuple(STAGE_ID_PREFIX.values())
-    accounted = _collect_ids(oracle_plan.get("step_coverage"), prefixes) | _collect_ids(oracle_plan.get("step_gaps"), prefixes)
+    accounted = _find_matching_ids(oracle_plan.get("step_coverage"), prefixes) | _find_matching_ids(oracle_plan.get("step_gaps"), prefixes)
 
     issues: list[ValidationIssue] = []
     oracle_plan_path = root / ORACLES_DIR / "oracle_plan.json"
     for item in required:
-        stage_name, item_id, kind, name = item.stage_name, item.item_id, item.kind, item.name
-        if item_id not in accounted:
+        if item.item_id not in accounted:
             issues.append(ValidationIssue(
                 code="uncovered_plan_item", severity="error", path=oracle_plan_path,
-                message=f"[{stage_name}] {item_id!r} (kind={kind!r}, name={name!r}) not in step_coverage or step_gaps",
+                message=f"[{item.stage_name}] {item.item_id!r} (category={item.category!r}, name={item.name!r}) not in step_coverage or step_gaps",
             ))
     return issues
 
 
-def _collect_ids(value: Any, prefixes: tuple[str, ...]) -> set[str]:
-    """Recursively collect strings matching item ID prefixes."""
+def _find_matching_ids(data: Any, prefixes: tuple[str, ...]) -> set[str]:
+    """Recursively find strings matching item ID prefixes."""
     ids: set[str] = set()
-    if isinstance(value, str) and value.startswith(prefixes):
-        ids.add(value)
-    elif isinstance(value, list):
-        for v in value:
-            ids.update(_collect_ids(v, prefixes))
-    elif isinstance(value, dict):
-        for k, v in value.items():
-            if isinstance(k, str) and k.startswith(prefixes):
-                ids.add(k)
-            ids.update(_collect_ids(v, prefixes))
+    if isinstance(data, str) and data.startswith(prefixes):
+        ids.add(data)
+    elif isinstance(data, list):
+        for entry in data:
+            ids.update(_find_matching_ids(entry, prefixes))
+    elif isinstance(data, dict):
+        for key, entry in data.items():
+            if isinstance(key, str) and key.startswith(prefixes):
+                ids.add(key)
+            ids.update(_find_matching_ids(entry, prefixes))
     return ids
 
 
@@ -368,17 +302,17 @@ def _check_artifact_plan_stages(path: Path, stages: dict[str, Any]) -> list[Vali
                 issues.append(ValidationIssue(code="artifact_plan_item_field_type", severity="error", path=path, message=f"{label} item_id must be a string"))
 
             for field in ("kind", "name", "requirement", "command", "notes"):
-                v = item.get(field)
-                if v is not None and not isinstance(v, str):
+                field_value = item.get(field)
+                if field_value is not None and not isinstance(field_value, str):
                     issues.append(ValidationIssue(code="artifact_plan_item_field_type", severity="error", path=path, message=f"{label} {field!r} must be a string"))
 
             outputs = item.get("expected_outputs")
             if outputs is not None and not isinstance(outputs, list):
                 issues.append(ValidationIssue(code="artifact_plan_item_field_type", severity="error", path=path, message=f"{label} expected_outputs must be a list"))
             elif isinstance(outputs, list):
-                for oi, v in enumerate(outputs, 1):
-                    if not isinstance(v, str):
-                        issues.append(ValidationIssue(code="artifact_plan_item_field_type", severity="error", path=path, message=f"{label} expected_outputs[{oi}] must be a string"))
+                for output_idx, output_value in enumerate(outputs, 1):
+                    if not isinstance(output_value, str):
+                        issues.append(ValidationIssue(code="artifact_plan_item_field_type", severity="error", path=path, message=f"{label} expected_outputs[{output_idx}] must be a string"))
 
     return issues
 
@@ -392,28 +326,3 @@ def _get_call_name(node: ast.AST) -> str:
     return ""
 
 
-def _extract_ref_paths(root: Path) -> list[Path]:
-    path = root / ORACLES_DIR / "main.py"
-    if not path.exists():
-        return []
-    try:
-        tree = ast.parse(path.read_text("utf-8"), filename=str(path))
-    except Exception:
-        return []
-
-    results: set[Path] = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        if _get_call_name(node.func).split(".")[-1] != "EntryConfig":
-            continue
-        for kw in node.keywords:
-            if kw.arg != "ground_truth_paths" or not isinstance(kw.value, ast.Dict):
-                continue
-            for val in kw.value.values:
-                parts = [item.value for item in ast.walk(val) if isinstance(item, ast.Constant) and isinstance(item.value, str)]
-                if "refs" in parts:
-                    for p in parts:
-                        if p.endswith(".json"):
-                            results.add(root / ORACLES_DIR / "refs" / Path(p).name)
-    return sorted(results)

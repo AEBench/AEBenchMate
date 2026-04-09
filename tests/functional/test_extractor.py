@@ -9,10 +9,10 @@ claude_agent_sdk = pytest.importorskip("claude_agent_sdk")
 
 from extractor import (
     _assign_item_ids,
-    _plan_prompt,
+    _extraction_prompt,
     _make_empty_plan,
-    _clean_item,
-    _clean_plan,
+    _normalize_item,
+    _normalize_plan,
     _parse_plan_json,
 )
 
@@ -38,7 +38,7 @@ def test_parse_rejects_garbage() -> None:
 def test_normalize_item_valid() -> None:
     raw = {"kind": "dependency", "name": "python", "requirement": ">=3.10",
            "command": "python --version", "expected_outputs": ["3.10"], "notes": ""}
-    item = _clean_item(raw)
+    item = _normalize_item(raw)
     assert item is not None
     assert item["kind"] == "dependency"
     assert item["name"] == "python"
@@ -46,15 +46,15 @@ def test_normalize_item_valid() -> None:
 
 
 def test_normalize_item_missing_kind() -> None:
-    assert _clean_item({"name": "x"}) is None
+    assert _normalize_item({"name": "x"}) is None
 
 
 def test_normalize_item_missing_name() -> None:
-    assert _clean_item({"kind": "dep"}) is None
+    assert _normalize_item({"kind": "dep"}) is None
 
 
 def test_normalize_item_not_dict() -> None:
-    assert _clean_item("string") is None
+    assert _normalize_item("string") is None
 
 
 
@@ -73,7 +73,7 @@ def test_normalize_plan_assigns_ids() -> None:
             "experiment_runs": [],
         },
     }
-    plan = _clean_plan(payload, readme_path="README.md")
+    plan = _normalize_plan(payload, readme_path="README.md")
 
     assert plan["stages"]["env_setup"][0]["item_id"] == "env-001"
     assert plan["stages"]["env_setup"][1]["item_id"] == "env-002"
@@ -87,7 +87,7 @@ def test_normalize_plan_preserves_metadata() -> None:
         "summary": "Does stuff",
         "stages": {"env_setup": [], "build_artifact": [], "benchmark_prep": [], "experiment_runs": []},
     }
-    plan = _clean_plan(payload, readme_path="README.md")
+    plan = _normalize_plan(payload, readme_path="README.md")
     assert plan["artifact_name"] == "MyArtifact"
     assert plan["summary"] == "Does stuff"
     assert plan["schema_version"] == 1
@@ -103,23 +103,23 @@ def test_normalize_plan_drops_invalid_items() -> None:
             ],
         },
     }
-    plan = _clean_plan(payload, readme_path="x")
+    plan = _normalize_plan(payload, readme_path="x")
     assert len(plan["stages"]["env_setup"]) == 1
 
 
 
 def test_prompt_contains_readme_text() -> None:
-    prompt = _plan_prompt("This is the README content", "README.md")
+    prompt = _extraction_prompt("This is the README content", "README.md")
     assert "This is the README content" in prompt
 
 
 def test_prompt_contains_feedback_when_given() -> None:
-    prompt = _plan_prompt("readme", "README.md", feedback_text="fix the stages")
+    prompt = _extraction_prompt("readme", "README.md", feedback_text="fix the stages")
     assert "fix the stages" in prompt
 
 
 def test_prompt_without_feedback() -> None:
-    prompt = _plan_prompt("readme", "README.md", feedback_text=None)
+    prompt = _extraction_prompt("readme", "README.md", feedback_text=None)
     assert "feedback" not in prompt.lower()
 
 

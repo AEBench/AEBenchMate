@@ -8,14 +8,14 @@ from pathlib import Path
 import pytest
 
 from run_docker import (
-    DockerArgs,
+    DockerRunConfig,
     make_container_name,
     make_run_id,
     resolve_spec,
     read_cost_from_report,
     validate_spec,
 )
-from utils import EvalSpec
+from utils import OracleGenConfig
 
 
 def test_make_container_name() -> None:
@@ -48,7 +48,7 @@ def test_read_cost_missing_file(tmp_path: Path) -> None:
     assert read_cost_from_report(tmp_path / "nope.json", "extract") is None
 
 
-def _make_spec(tmp_path: Path, **overrides) -> DockerArgs:
+def _make_spec(tmp_path: Path, **overrides) -> DockerRunConfig:
     artifact_dir = tmp_path / "artifact"
     artifact_dir.mkdir(exist_ok=True)
     workspace = tmp_path / "workspace"
@@ -60,7 +60,7 @@ def _make_spec(tmp_path: Path, **overrides) -> DockerArgs:
     defaults = dict(
         artifact_id="test-art",
         workspace_dir=workspace,
-        eval_spec=EvalSpec(
+        eval_spec=OracleGenConfig(
             artifact_id="test-art",
             artifact_dir=artifact_dir,
             artifact_readme=readme,
@@ -70,7 +70,7 @@ def _make_spec(tmp_path: Path, **overrides) -> DockerArgs:
         stage="validate",
     )
     defaults.update(overrides)
-    return DockerArgs(**defaults)
+    return DockerRunConfig(**defaults)
 
 
 def test_resolve_spec_defaults(tmp_path: Path) -> None:

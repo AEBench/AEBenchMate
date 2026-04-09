@@ -40,9 +40,9 @@ def write_case_toml(
         f'id = "{case_id}"',
         "",
         "[case_brief]",
-        f'core_claim = "{_esc(core_claim or "TODO: describe the core claim")}"',
-        f'acceptable_evidence = "{_esc(acceptable_evidence or "TODO: describe what counts as success")}"',
-        f'allowed_tolerance = "{_esc(allowed_tolerance)}"',
+        f'core_claim = "{_escape_toml(core_claim or "TODO: describe the core claim")}"',
+        f'acceptable_evidence = "{_escape_toml(acceptable_evidence or "TODO: describe what counts as success")}"',
+        f'allowed_tolerance = "{_escape_toml(allowed_tolerance)}"',
         "",
         "[run]",
         f'id = "{case_id}"',
@@ -116,6 +116,6 @@ def build_case_bundle(
     return written
 
 
-def _esc(s: str) -> str:
+def _escape_toml(value: str) -> str:
     """Escape backslash, quote, newline for TOML strings."""
-    return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")

@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 from typing import Any
@@ -17,7 +16,7 @@ from claude_agent_sdk.types import ToolPermissionContext
 from utils import write_json_file
 
 
-PLANNER_SYSTEM_APPEND = """
+EXTRACTOR_SYSTEM_PROMPT = """
 You are analyzing a README to produce a structured artifact plan.
 
 Hard rules:
@@ -71,7 +70,7 @@ _FORBIDDEN_GENERATOR_TOOLS = (
     "Agent(Plan)",
 )
 
-_FORBIDDEN_PLANNER_TOOLS = (
+_FORBIDDEN_EXTRACTOR_TOOLS = (
     "Bash",
     "Edit",
     "Write",
@@ -81,7 +80,7 @@ _FORBIDDEN_PLANNER_TOOLS = (
     "Agent(Plan)",
 )
 
-_FORBIDDEN_BASH = re.compile(
+_BLOCKED_BASH_PATTERN = re.compile(
     r"(^|[;&|`(])\s*(git|sudo|ssh|scp|curl|wget|docker|podman|kubectl|rsync)\b"
     r"|\brm\s+-rf\b"
 )
@@ -125,15 +124,15 @@ _SECRET_FILE_NAMES = (
 )
 
 
-def planner_options(spec: Any) -> ClaudeAgentOptions:
+def extractor_options(spec: Any) -> ClaudeAgentOptions:
     return ClaudeAgentOptions(
         tools={"type": "preset", "preset": "claude_code"},
         system_prompt={
             "type": "preset",
             "preset": "claude_code",
-            "append": PLANNER_SYSTEM_APPEND,
+            "append": EXTRACTOR_SYSTEM_PROMPT,
         },
-        disallowed_tools=list(_FORBIDDEN_PLANNER_TOOLS),
+        disallowed_tools=list(_FORBIDDEN_EXTRACTOR_TOOLS),
         setting_sources=[],
         permission_mode="default",
         cwd=spec.artifact_dir.as_posix(),
@@ -163,7 +162,7 @@ def generator_options(
         disallowed_tools=list(_FORBIDDEN_GENERATOR_TOOLS),
         setting_sources=["project"],
         permission_mode="default",
-        can_use_tool=permission_handler(
+        can_use_tool=make_permission_handler(
             spec.artifact_dir,
             output_dir,
             output_base_dir=output_base_dir,
@@ -229,7 +228,7 @@ def write_policy_files(
     claude_md_path.write_text(claude_md, "utf-8")
 
 
-def permission_handler(
+def make_permission_handler(
     artifact_dir: Path,
     output_dir: Path,
     *,
@@ -278,7 +277,7 @@ def permission_handler(
     return can_use_tool
 
 
-async def keepalive_hook(
+async def noop_hook(
     _input_data: dict[str, Any],
     _tool_use_id: str | None,
     _context: Any,
@@ -286,7 +285,7 @@ async def keepalive_hook(
     return {"continue_": True}
 
 
-_HOOK_MATCHERS: dict[str, list[HookMatcher]] = {"PreToolUse": [HookMatcher(hooks=[keepalive_hook])]}
+_HOOK_MATCHERS: dict[str, list[HookMatcher]] = {"PreToolUse": [HookMatcher(hooks=[noop_hook])]}
 
 
 def _build_settings(output_dir: Path) -> dict[str, Any]:
@@ -346,7 +345,7 @@ def _build_claude_md(
     primitives_dir: Path | None = None,
     examples_dir: Path | None = None,
 ) -> str:
-    instructions_path = howto_path / "INSTRUCTIONS.md"
+    instructions_path = howto_path / "add_case.md"
     building_blocks_path = primitives_dir or howto_path / "oracle_building_blocks"
     examples_path = examples_dir or howto_path / "oracle_examples"
 
@@ -368,9 +367,9 @@ def _build_claude_md(
         [
             "",
             "Before writing code, read in this order:",
-            f"1. Read {instructions_path} file in the {howto_path.as_posix()}/ directory.",
-            f"2. Read {building_blocks_path}/ next and reuse those building blocks whenever possible.",
-            f"3. Read {examples_path}/ next and reuse their structure and patterns when appropriate.",
+            f"1. Read {instructions_path.as_posix()} in the {howto_path.as_posix()}/ directory.",
+            f"2. Read {building_blocks_path.as_posix()}/ next and reuse those building blocks whenever possible.",
+            f"3. Read {examples_path.as_posix()}/ next and reuse their structure and patterns when appropriate.",
         ]
     )
 
@@ -447,7 +446,7 @@ def _check_bash_permission(
             interrupt=True,
         )
 
-    if _FORBIDDEN_BASH.search(command):
+    if _BLOCKED_BASH_PATTERN.search(command):
         return PermissionResultDeny(
             message=f"Blocked bash command: {command}",
             interrupt=True,
@@ -471,10 +470,7 @@ def _check_write_permission(
         )
 
     resolved = _resolve_tool_path(artifact_dir, tool_path)
-    if not _is_within_path(resolved, output_dir) and not _is_within_path(
-        resolved,
-        claude_dir,
-    ):
+    if not resolved.is_relative_to(output_dir) and not resolved.is_relative_to(claude_dir):
         return PermissionResultDeny(
             message=f"Writes are limited to {output_dir} and {claude_dir}.",
             interrupt=True,
@@ -503,9 +499,9 @@ def _check_read_permission(
         )
 
     if (
-        _is_within_path(resolved, artifact_dir)
-        and not _is_within_path(resolved, output_dir)
-        and not _is_within_path(resolved, claude_dir)
+        resolved.is_relative_to(artifact_dir)
+        and not resolved.is_relative_to(output_dir)
+        and not resolved.is_relative_to(claude_dir)
         and _is_likely_source_code_dir(artifact_dir, resolved)
     ):
         return PermissionResultDeny(
@@ -540,10 +536,6 @@ def _resolve_tool_path(root: Path, value: str) -> Path:
     if not path.is_absolute():
         path = root / path
     return path.resolve()
-
-
-def _is_within_path(path: Path, parent: Path) -> bool:
-    return path.is_relative_to(parent)
 
 
 def _is_secret_path(root: Path, path: Path) -> bool:

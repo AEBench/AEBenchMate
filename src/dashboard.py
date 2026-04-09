@@ -16,8 +16,6 @@ _COLORS = {
     "yellow": "#FFD300",
     "cyan": "#00FFFF",
     "green": "#39FF14",
-    "orange": "#FF782F",
-    "violet": "#EDE1FF",
 }
 
 
@@ -78,13 +76,6 @@ def print_success(message: str) -> None:
     _console.print(f"[bold {_COLORS['green']}]🗹[/bold {_COLORS['green']}] {message}")
 
 
-def print_retry(attempt: int, max_repairs: int) -> None:
-    _console.print(
-        f"[bold {_COLORS['yellow']}]🔍[/bold {_COLORS['yellow']}] repair attempt {attempt} "
-        f"(max repairs: {max_repairs})"
-    )
-
-
 def print_cost(call_cost_usd: float | None, total_spent_usd: float) -> None:
     if call_cost_usd is None:
         _console.print(f"[{_COLORS['green']}]💰 total spent[/{_COLORS['green']}]: ${total_spent_usd:.6f}")
@@ -94,33 +85,6 @@ def print_cost(call_cost_usd: float | None, total_spent_usd: float) -> None:
         f"[{_COLORS['green']}]💰 call[/{_COLORS['green']}]: ${call_cost_usd:.6f}    "
         f"[{_COLORS['green']}]💰 total[/{_COLORS['green']}]: ${total_spent_usd:.6f}"
     )
-
-
-def print_validator_summary(report: Any, *, title: str = "Validation") -> None:
-    table = Table(box=ROUNDED, show_header=True, header_style="bold")
-    table.add_column("Severity", style="white", no_wrap=True)
-    table.add_column("Code", style="cyan", no_wrap=True)
-    table.add_column("Path", style="magenta")
-    table.add_column("Message", style="white")
-
-    issue_count = 0
-    for issue in getattr(report, "issues", ()):
-        severity = str(getattr(issue, "severity", ""))
-        code = str(getattr(issue, "code", ""))
-        path = str(getattr(issue, "path", ""))
-        message = str(getattr(issue, "message", ""))
-        table.add_row(severity, code, path, message)
-        issue_count += 1
-
-    if issue_count == 0:
-        panel = Panel(f"{title}: no issues", border_style="green", box=ROUNDED)
-        _console.print(panel)
-        return
-
-    ok_value = bool(getattr(report, "ok", False))
-    border_style = f"{_COLORS['green']}" if ok_value else "red"
-    panel = Panel(table, title=title, border_style=border_style, box=ROUNDED)
-    _console.print(panel)
 
 
 def print_footer_mode(mode_text: str) -> None:

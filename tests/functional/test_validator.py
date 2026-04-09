@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from validator import validate, validate_artifact_plan, ORACLES_DIR
+from validator import validate_oracle_package, validate_artifact_plan, ORACLES_DIR
 
 
 def _write(path: Path, content: str) -> None:
@@ -43,7 +43,7 @@ def test_validate_subprocess_popen_forbidden(tmp_path: Path) -> None:
             "        subprocess.Popen(['ls'])\n"
         ),
     })
-    report = validate(tmp_path)
+    report = validate_oracle_package(tmp_path)
     codes = [i.code for i in report.issues]
     assert "forbidden_popen" in codes
 
@@ -57,7 +57,7 @@ def test_validate_os_system_forbidden(tmp_path: Path) -> None:
             "        os.system('ls')\n"
         ),
     })
-    report = validate(tmp_path)
+    report = validate_oracle_package(tmp_path)
     codes = [i.code for i in report.issues]
     assert "forbidden_call" in codes
 
@@ -69,7 +69,7 @@ def test_validate_hardcoded_path_warning(tmp_path: Path) -> None:
             "    PATH = '/home/user/data'\n"
         ),
     })
-    report = validate(tmp_path)
+    report = validate_oracle_package(tmp_path)
     codes = [i.code for i in report.issues]
     assert "hardcoded_path" in codes
     assert all(i.severity == "warning" for i in report.issues if i.code == "hardcoded_path")
@@ -88,7 +88,7 @@ def test_validate_valid_oracle_all_phases_passes(tmp_path: Path) -> None:
         "step_gaps": [],
         "step_augmentations": [],
     })
-    report = validate(tmp_path)
+    report = validate_oracle_package(tmp_path)
     errors = [i for i in report.issues if i.severity == "error"]
     assert errors == []
     assert report.ok is True

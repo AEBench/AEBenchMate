@@ -1,4 +1,4 @@
-"""EvalSpec, I/O helpers, budget tracking, text utilities."""
+"""OracleGenConfig, I/O helpers, budget tracking, text utilities."""
 from __future__ import annotations
 
 import json
@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from utils import (
-    EvalSpec,
+    OracleGenConfig,
     load_env_file,
     load_guidance_root,
     read_json_if_exists,
@@ -19,23 +19,23 @@ from utils import (
 )
 
 
-# -- EvalSpec properties and resolution ----------------------------------------
+# -- OracleGenConfig properties and resolution ----------------------------------------
 
 def test_spec_output_dir_default(tmp_path: Path) -> None:
-    spec = EvalSpec(artifact_id="x", artifact_dir=tmp_path)
+    spec = OracleGenConfig(artifact_id="x", artifact_dir=tmp_path)
     assert spec.output_dir == tmp_path / "oracles"
 
 
 def test_spec_output_dir_with_base(tmp_path: Path) -> None:
     base = tmp_path / "case_bundle"
     base.mkdir()
-    spec = EvalSpec(artifact_id="x", artifact_dir=tmp_path, output_base_dir=base)
+    spec = OracleGenConfig(artifact_id="x", artifact_dir=tmp_path, output_base_dir=base)
     assert spec.output_dir == base / "oracles"
 
 
 def test_spec_resolved_makes_paths_absolute(tmp_path: Path) -> None:
-    spec = EvalSpec(artifact_id="x", artifact_dir=Path("relative/path"))
-    resolved = spec.resolved()
+    spec = OracleGenConfig(artifact_id="x", artifact_dir=Path("relative/path"))
+    resolved = spec.resolve_paths()
     assert resolved.artifact_dir.is_absolute()
 
 
@@ -46,8 +46,8 @@ def test_spec_auto_discover_plan_from_output_base_dir(tmp_path: Path) -> None:
     output_base.mkdir()
     plan = output_base / "artifact_plan.json"
     plan.write_text('{"steps": []}')
-    spec = EvalSpec(artifact_id="test", artifact_dir=artifact_dir, output_base_dir=output_base)
-    assert spec.resolved().artifact_plan_path == plan.resolve()
+    spec = OracleGenConfig(artifact_id="test", artifact_dir=artifact_dir, output_base_dir=output_base)
+    assert spec.resolve_paths().artifact_plan_path == plan.resolve()
 
 
 def test_spec_auto_discover_plan_fallback_to_artifact_dir(tmp_path: Path) -> None:
@@ -57,21 +57,21 @@ def test_spec_auto_discover_plan_fallback_to_artifact_dir(tmp_path: Path) -> Non
     output_base.mkdir()
     plan = artifact_dir / "artifact_plan.json"
     plan.write_text('{"steps": []}')
-    spec = EvalSpec(artifact_id="test", artifact_dir=artifact_dir, output_base_dir=output_base)
-    assert spec.resolved().artifact_plan_path == plan.resolve()
+    spec = OracleGenConfig(artifact_id="test", artifact_dir=artifact_dir, output_base_dir=output_base)
+    assert spec.resolve_paths().artifact_plan_path == plan.resolve()
 
 
 def test_spec_resolved_example_oracle_dirs(tmp_path: Path) -> None:
     d = tmp_path / "examples" / "case1"
     d.mkdir(parents=True)
-    spec = EvalSpec(artifact_id="test", artifact_dir=tmp_path, example_oracle_dirs=(d,))
-    assert all(p.is_absolute() for p in spec.resolved().example_oracle_dirs)
+    spec = OracleGenConfig(artifact_id="test", artifact_dir=tmp_path, example_oracle_dirs=(d,))
+    assert all(p.is_absolute() for p in spec.resolve_paths().example_oracle_dirs)
 
 
 # -- Budget tracking -----------------------------------------------------------
 
 def test_over_budget(tmp_path: Path) -> None:
-    spec = EvalSpec(artifact_id="x", artifact_dir=tmp_path, max_budget_usd=1.0)
+    spec = OracleGenConfig(artifact_id="x", artifact_dir=tmp_path, max_budget_usd=1.0)
     spec.cost_usd = 0.5
     assert not spec.over_budget
     spec.cost_usd = 1.0
@@ -79,7 +79,7 @@ def test_over_budget(tmp_path: Path) -> None:
 
 
 def test_add_cost_accumulates_and_ignores_none(tmp_path: Path) -> None:
-    spec = EvalSpec(artifact_id="x", artifact_dir=tmp_path)
+    spec = OracleGenConfig(artifact_id="x", artifact_dir=tmp_path)
     spec.add_cost(0.5)
     spec.add_cost(0.3)
     assert abs(spec.cost_usd - 0.8) < 1e-9

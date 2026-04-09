@@ -17,7 +17,7 @@ from pathlib import Path
 import logging
 
 from utils import (
-    EvalSpec,
+    OracleGenConfig,
     configure_logging,
     load_guidance_root,
     load_env_file,
@@ -47,10 +47,10 @@ _DOCKER_EXEC_TIMEOUT_S: float = 6 * 3600
 
 
 @dataclass(frozen=True)
-class DockerArgs:
+class DockerRunConfig:
     artifact_id: str
     workspace_dir: Path
-    eval_spec: EvalSpec
+    eval_spec: OracleGenConfig
     image_ref: str
     stage: str = "pipeline"
     internals_dir: Path | None = None
@@ -77,7 +77,7 @@ def project_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def run(spec: DockerArgs) -> DockerResult:
+def run_in_docker(spec: DockerRunConfig) -> DockerResult:
     spec = resolve_spec(spec)
     validate_spec(spec)
     ensure_image(spec)
@@ -112,28 +112,16 @@ def run(spec: DockerArgs) -> DockerResult:
     print_info(f"container: {container_name}")
     print_footer_mode(f"stage: {spec.stage}")
 
+    _path_str = lambda p: p.as_posix() if p is not None else None
+    eval_spec = spec.eval_spec
     state: dict[str, object] = {
         "artifact_id": spec.artifact_id,
         "workspace_dir": spec.workspace_dir.as_posix(),
-        "artifact_dir": spec.eval_spec.artifact_dir.as_posix(),
-        "artifact_readme": (
-            spec.eval_spec.artifact_readme.as_posix()
-            if spec.eval_spec.artifact_readme is not None
-            else None
-        ),
-        "howto_path": (
-            spec.eval_spec.howto_path.as_posix()
-            if spec.eval_spec.howto_path is not None
-            else None
-        ),
-        "artifact_plan_path": (
-            spec.eval_spec.artifact_plan_path.as_posix()
-            if spec.eval_spec.artifact_plan_path is not None
-            else None
-        ),
-        "example_oracle_dirs": [
-            path.as_posix() for path in spec.eval_spec.example_oracle_dirs
-        ],
+        "artifact_dir": eval_spec.artifact_dir.as_posix(),
+        "artifact_readme": _path_str(eval_spec.artifact_readme),
+        "howto_path": _path_str(eval_spec.howto_path),
+        "artifact_plan_path": _path_str(eval_spec.artifact_plan_path),
+        "example_oracle_dirs": [p.as_posix() for p in eval_spec.example_oracle_dirs],
         "image_ref": spec.image_ref,
         "stage": spec.stage,
         "run_id": run_id,
@@ -142,7 +130,11 @@ def run(spec: DockerArgs) -> DockerResult:
         "created_at_epoch": time.time(),
         "status": "created",
     }
-    write_json_file(metadata_path, state, indent=2, sort_keys=True)
+
+    def _save_state() -> None:
+        write_json_file(metadata_path, state, indent=2, sort_keys=True)
+
+    _save_state()
 
     exit_code = 1
     container_id = ""
@@ -151,12 +143,10 @@ def run(spec: DockerArgs) -> DockerResult:
     try:
         container_id = create_container(spec, container_name)
         state["container_id"] = container_id
-        state["status"] = "created_container"
-        write_json_file(metadata_path, state, indent=2, sort_keys=True)
 
         start_container(spec, container_name)
         state["status"] = "running"
-        write_json_file(metadata_path, state, indent=2, sort_keys=True)
+        _save_state()
 
         prepare_container_dirs(spec, container_name)
         copy_inputs(spec, container_name)
@@ -176,24 +166,27 @@ def run(spec: DockerArgs) -> DockerResult:
         )
 
         cost_usd = read_cost_from_report(report_path, spec.stage)
-        state["cost_usd"] = cost_usd
-
-        state["status"] = "completed" if exit_code == 0 else "failed"
-        state["exit_code"] = exit_code
-        state["report_path"] = report_path.as_posix()
-        state["output_oracles_dir"] = output_oracles_dir.as_posix()
-        state["internals_dir"] = run_dir.as_posix()
-        write_json_file(metadata_path, state, indent=2, sort_keys=True)
+        state.update(
+            cost_usd=cost_usd,
+            status="completed" if exit_code == 0 else "failed",
+            exit_code=exit_code,
+            report_path=report_path.as_posix(),
+            output_oracles_dir=output_oracles_dir.as_posix(),
+            internals_dir=run_dir.as_posix(),
+        )
+        _save_state()
 
     finally:
         try:
             if container_name:
                 stop_container(spec, container_name)
         finally:
-            state["finished_at_epoch"] = time.time()
-            state["exit_code"] = exit_code
-            state["logs"] = {"docker_exec": docker_log_path.as_posix()}
-            write_json_file(metadata_path, state, indent=2, sort_keys=True)
+            state.update(
+                finished_at_epoch=time.time(),
+                exit_code=exit_code,
+                logs={"docker_exec": docker_log_path.as_posix()},
+            )
+            _save_state()
 
     print_paths_summary(
         clean_oracles_dir=output_oracles_dir,
@@ -219,9 +212,9 @@ def run(spec: DockerArgs) -> DockerResult:
     )
 
 
-def resolve_spec(spec: DockerArgs) -> DockerArgs:
+def resolve_spec(spec: DockerRunConfig) -> DockerRunConfig:
     workspace_dir = spec.workspace_dir.resolve()
-    eval_spec = spec.eval_spec.resolved()
+    eval_spec = spec.eval_spec.resolve_paths()
 
     internals_dir = spec.internals_dir
     if internals_dir is None:
@@ -232,7 +225,7 @@ def resolve_spec(spec: DockerArgs) -> DockerArgs:
     if not artifact_id:
         artifact_id = workspace_dir.name
 
-    return DockerArgs(
+    return DockerRunConfig(
         artifact_id=artifact_id,
         workspace_dir=workspace_dir,
         eval_spec=eval_spec,
@@ -274,7 +267,7 @@ def read_cost_from_report(report_path: Path, stage: str) -> float | None:
     return None
 
 
-def validate_spec(spec: DockerArgs) -> None:
+def validate_spec(spec: DockerRunConfig) -> None:
     if not spec.workspace_dir.is_dir():
         raise FileNotFoundError(f"Workspace directory not found: {spec.workspace_dir}")
 
@@ -322,7 +315,7 @@ def validate_spec(spec: DockerArgs) -> None:
         raise ValueError("howto_path is required for this stage")
 
 
-def ensure_image(spec: DockerArgs) -> None:
+def ensure_image(spec: DockerRunConfig) -> None:
     result = subprocess.run(
         [spec.docker_bin, "image", "inspect", spec.image_ref],
         stdout=subprocess.DEVNULL,
@@ -345,7 +338,7 @@ def make_container_name(artifact_id: str, run_id: str) -> str:
     return f"ae-{safe_artifact}-{run_id}".lower()
 
 
-def create_container(spec: DockerArgs, container_name: str) -> str:
+def create_container(spec: DockerRunConfig, container_name: str) -> str:
     cmd = [
         spec.docker_bin,
         "create",
@@ -360,11 +353,11 @@ def create_container(spec: DockerArgs, container_name: str) -> str:
     return run_cmd(cmd).strip()
 
 
-def start_container(spec: DockerArgs, container_name: str) -> None:
+def start_container(spec: DockerRunConfig, container_name: str) -> None:
     run_cmd([spec.docker_bin, "start", container_name])
 
 
-def stop_container(spec: DockerArgs, container_name: str) -> None:
+def stop_container(spec: DockerRunConfig, container_name: str) -> None:
     subprocess.run(
         [spec.docker_bin, "stop", container_name],
         stdout=subprocess.DEVNULL,
@@ -374,7 +367,7 @@ def stop_container(spec: DockerArgs, container_name: str) -> None:
     )
 
 
-def prepare_container_dirs(spec: DockerArgs, container_name: str) -> None:
+def prepare_container_dirs(spec: DockerRunConfig, container_name: str) -> None:
     mkdirs = [
         _ARTIFACT_DIR.as_posix(),
         _GUIDANCE_DIR.as_posix(),
@@ -406,90 +399,51 @@ def prepare_container_dirs(spec: DockerArgs, container_name: str) -> None:
     )
 
 
-def copy_inputs(spec: DockerArgs, container_name: str) -> None:
-    root = project_root()
+def _docker_cp(spec: DockerRunConfig, src: str, dest: str) -> None:
+    run_cmd([spec.docker_bin, "cp", src, dest])
 
-    docker_cp_dir(
-        spec,
-        spec.eval_spec.artifact_dir,
-        f"{container_name}:{_ARTIFACT_DIR.as_posix()}",
-    )
+
+def copy_inputs(spec: DockerRunConfig, container_name: str) -> None:
+    root = project_root()
+    cp = lambda src, dest: _docker_cp(spec, src, dest)
+    cp_dir = lambda src, dest: cp(src.as_posix() + "/.", dest)
+    cp_file = lambda src, dest: cp(src.as_posix(), dest)
+
+    cp_dir(spec.eval_spec.artifact_dir, f"{container_name}:{_ARTIFACT_DIR.as_posix()}")
 
     if spec.eval_spec.howto_path is not None:
         if spec.eval_spec.howto_path.is_dir():
-            docker_cp_dir(
-                spec,
-                spec.eval_spec.howto_path,
-                f"{container_name}:{(_GUIDANCE_DIR / 'howtos').as_posix()}",
-            )
+            cp_dir(spec.eval_spec.howto_path, f"{container_name}:{(_GUIDANCE_DIR / 'howtos').as_posix()}")
         else:
-            docker_cp_file(
-                spec,
-                spec.eval_spec.howto_path,
-                f"{container_name}:{(_GUIDANCE_DIR / 'HOWTO.md').as_posix()}",
-            )
+            cp_file(spec.eval_spec.howto_path, f"{container_name}:{(_GUIDANCE_DIR / 'HOWTO.md').as_posix()}")
 
     if spec.eval_spec.primitives_dir is not None and spec.eval_spec.primitives_dir.is_dir():
-        docker_cp_dir(
-            spec,
-            spec.eval_spec.primitives_dir,
-            f"{container_name}:{(_GUIDANCE_DIR / 'primitives').as_posix()}",
-        )
+        cp_dir(spec.eval_spec.primitives_dir, f"{container_name}:{(_GUIDANCE_DIR / 'primitives').as_posix()}")
 
     if spec.eval_spec.examples_dir is not None and spec.eval_spec.examples_dir.is_dir():
-        docker_cp_dir(
-            spec,
-            spec.eval_spec.examples_dir,
-            f"{container_name}:{(_GUIDANCE_DIR / 'examples').as_posix()}",
-        )
+        cp_dir(spec.eval_spec.examples_dir, f"{container_name}:{(_GUIDANCE_DIR / 'examples').as_posix()}")
 
     for path in spec.eval_spec.example_oracle_dirs:
-        dest = (
-            _GUIDANCE_DIR
-            / "examples"
-            / path.parent.name
-            / "oracles"
-        )
-        docker_cp_dir(spec, path, f"{container_name}:{dest.as_posix()}")
+        dest = _GUIDANCE_DIR / "examples" / path.parent.name / "oracles"
+        cp_dir(path, f"{container_name}:{dest.as_posix()}")
 
-    docker_cp_dir(
-        spec,
-        root / "src",
-        f"{container_name}:{(_RUNNER_DIR / 'src').as_posix()}",
-    )
-
-    docker_cp_file(
-        spec,
-        root / "pyproject.toml",
-        f"{container_name}:{(_RUNNER_DIR / 'pyproject.toml').as_posix()}",
-    )
+    cp_dir(root / "src", f"{container_name}:{(_RUNNER_DIR / 'src').as_posix()}")
+    cp_file(root / "pyproject.toml", f"{container_name}:{(_RUNNER_DIR / 'pyproject.toml').as_posix()}")
 
     uv_lock = root / "uv.lock"
     if uv_lock.exists():
-        docker_cp_file(
-            spec,
-            uv_lock,
-            f"{container_name}:{(_RUNNER_DIR / 'uv.lock').as_posix()}",
-        )
+        cp_file(uv_lock, f"{container_name}:{(_RUNNER_DIR / 'uv.lock').as_posix()}")
 
     if spec.eval_spec.artifact_plan_path is not None:
-        docker_cp_file(
-            spec,
-            spec.eval_spec.artifact_plan_path,
-            f"{container_name}:{(_ARTIFACT_DIR / 'artifact_plan.json').as_posix()}",
-        )
+        cp_file(spec.eval_spec.artifact_plan_path, f"{container_name}:{(_ARTIFACT_DIR / 'artifact_plan.json').as_posix()}")
 
     host_output_oracles_dir = spec.workspace_dir / "oracles"
     if spec.stage == "validate" and host_output_oracles_dir.is_dir():
-        docker_cp_dir(
-            spec,
-            host_output_oracles_dir,
-            f"{container_name}:{(_ARTIFACT_DIR / 'oracles').as_posix()}",
-        )
+        cp_dir(host_output_oracles_dir, f"{container_name}:{(_ARTIFACT_DIR / 'oracles').as_posix()}")
 
 
 def run_stage_in_container(
-    spec: DockerArgs,
+    spec: DockerRunConfig,
     container_name: str,
     log_path: Path,
     report_path: Path,
@@ -558,7 +512,7 @@ def run_stage_in_container(
     return exit_code
 
 
-def build_container_cli_argv(spec: DockerArgs) -> list[str]:
+def build_container_cli_argv(spec: DockerRunConfig) -> list[str]:
     argv: list[str] = [
         "python",
         "-u",
@@ -629,7 +583,7 @@ def build_container_cli_argv(spec: DockerArgs) -> list[str]:
 
 
 def export_outputs(
-    spec: DockerArgs,
+    spec: DockerRunConfig,
     container_name: str,
     run_dir: Path,
     output_oracles_dir: Path,
@@ -720,16 +674,8 @@ def default_example_oracle_dirs(root: Path) -> tuple[Path, ...]:
     return tuple(sorted(paths))
 
 
-def docker_cp_file(spec: DockerArgs, src: Path, dest: str) -> None:
-    run_cmd([spec.docker_bin, "cp", src.as_posix(), dest])
-
-
-def docker_cp_dir(spec: DockerArgs, src: Path, dest: str) -> None:
-    run_cmd([spec.docker_bin, "cp", src.as_posix() + "/.", dest])
-
-
 def try_docker_cp_from_container(
-    spec: DockerArgs,
+    spec: DockerRunConfig,
     src: str,
     dest: Path,
 ) -> bool:
@@ -795,7 +741,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def spec_from_args(args: argparse.Namespace) -> DockerArgs:
+def spec_from_args(args: argparse.Namespace) -> DockerRunConfig:
     root = project_root()
     guidance_root = load_guidance_root(root)
 
@@ -832,7 +778,7 @@ def spec_from_args(args: argparse.Namespace) -> DockerArgs:
     else:
         example_dirs = default_example_oracle_dirs(root)
 
-    eval_spec = EvalSpec(
+    eval_spec = OracleGenConfig(
         artifact_id=args.artifact_id,
         artifact_dir=artifact_dir,
         artifact_readme=artifact_readme,
@@ -860,7 +806,7 @@ def spec_from_args(args: argparse.Namespace) -> DockerArgs:
     if args.internals_dir:
         internals_dir = Path(args.internals_dir)
 
-    return DockerArgs(
+    return DockerRunConfig(
         artifact_id=artifact_id,
         workspace_dir=workspace_dir,
         eval_spec=eval_spec,
@@ -881,7 +827,7 @@ def main(argv: list[str] | None = None) -> int:
     log_file = resolve_log_file(root, os.environ.get("ARTIFACT_EVAL_DEBUG_LOG"))
     configure_logging(verbose=args.verbose, log_file=log_file)
 
-    result = run(spec_from_args(args))
+    result = run_in_docker(spec_from_args(args))
     print(json.dumps(asdict(result), indent=2, sort_keys=True, default=str), flush=True)
     return 0 if result.exit_code == 0 else result.exit_code
 

@@ -13,7 +13,7 @@ _DEFAULT_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 _DEFAULT_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 
 from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
 
@@ -26,14 +26,14 @@ def load_guidance_root(project_root: Path) -> Path | None:
 
     with config_path.open("rb") as f:
         data = tomllib.load(f)
-    raw = data.get("guidance", {}).get("root")
-    if not raw:
+    guidance_path = data.get("guidance", {}).get("root")
+    if not guidance_path:
         return None
 
-    return (project_root / raw).resolve()
+    return (project_root / guidance_path).resolve()
 
 @dataclass
-class EvalSpec:
+class OracleGenConfig:
     artifact_id: str
     artifact_dir: Path
     artifact_readme: Path | None = None
@@ -53,7 +53,7 @@ class EvalSpec:
     verbose: bool = False
     cost_usd: float = 0.0
 
-    def resolved(self) -> "EvalSpec":
+    def resolve_paths(self) -> "OracleGenConfig":
         self.artifact_dir = self.artifact_dir.resolve()
         self.artifact_readme = self.artifact_readme.resolve() if self.artifact_readme else None
         self.howto_path = self.howto_path.resolve() if self.howto_path else None
@@ -85,13 +85,15 @@ class EvalSpec:
         return base / self.output_dir_name
 
     @property
-    def oracle_plan_path(self) -> Path:
-        return self.output_dir / "oracle_plan.json"
-
-    @property
     def default_artifact_plan_path(self) -> Path:
         base = self.output_base_dir if self.output_base_dir is not None else self.artifact_dir
         return base / "artifact_plan.json"
+
+    @property
+    def artifact_plan_output_path(self) -> Path:
+        if self.artifact_plan_path is not None:
+            return self.artifact_plan_path
+        return self.default_artifact_plan_path
 
     @property
     def over_budget(self) -> bool:
@@ -107,7 +109,6 @@ class EvalSpec:
 
 def configure_logging(
     verbose: bool = False,
-    debug: bool = False,
     log_file: Path | None = None,
 ) -> None:
     root = logging.getLogger()
@@ -121,9 +122,7 @@ def configure_logging(
     )
 
     console_handler = logging.StreamHandler(sys.stderr)
-    if debug:
-        console_handler.setLevel(logging.DEBUG)
-    elif verbose:
+    if verbose:
         console_handler.setLevel(logging.INFO)
     else:
         console_handler.setLevel(logging.WARNING)
@@ -204,12 +203,8 @@ def write_json_file(
 async def read_response(
     client: "ClaudeSDKClient",
     *,
-    logger=None,
-    verbose: bool = False,
-    line_fn=None,
+    on_line=None,
 ) -> tuple[str, float | None, dict[str, Any] | None]:
-    from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
-
     parts: list[str] = []
     total_cost_usd: float | None = None
     usage: dict[str, Any] | None = None
@@ -219,9 +214,9 @@ async def read_response(
             for block in message.content:
                 if isinstance(block, TextBlock):
                     parts.append(block.text)
-                    if line_fn is not None and block.text:
+                    if on_line is not None and block.text:
                         for line in block.text.splitlines():
-                            line_fn(line)
+                            on_line(line)
         elif isinstance(message, ResultMessage):
             total_cost_usd = message.total_cost_usd
             usage = message.usage
@@ -292,13 +287,6 @@ def log_debug_json(
         return
 
     log_debug_text(logger, title, text, max_chars=max_chars)
-
-
-def log_debug_spec(logger: logging.Logger, spec: EvalSpec) -> None:
-    if not logger.isEnabledFor(logging.DEBUG):
-        return
-
-    log_debug_json(logger, "Resolved spec", asdict(spec))
 
 
 def log_debug_stage_counts(

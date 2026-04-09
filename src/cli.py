@@ -14,9 +14,9 @@ from case_builder import build_case_bundle, write_case_toml
 from extractor import extract_artifact_plan
 import dataclasses
 
-from generator import generate as generate_oracles
+from generator import generate_oracles
 from utils import (
-    EvalSpec,
+    OracleGenConfig,
     configure_logging,
     load_guidance_root,
     load_env_file,
@@ -24,9 +24,8 @@ from utils import (
     write_json_file,
 )
 from validator import (
-    create_missing_refs,
-    _report_dict as validation_report_dict,
-    validate,
+    report_to_dict,
+    validate_oracle_package,
     validate_artifact_plan,
 )
 from dashboard import (
@@ -116,7 +115,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def _make_spec(
     args: argparse.Namespace,
     guidance_root: Path | None = None,
-) -> EvalSpec:
+) -> OracleGenConfig:
     guidance_dir_arg = getattr(args, "guidance_dir", None)
     guidance_dir = Path(guidance_dir_arg) if guidance_dir_arg else guidance_root
 
@@ -144,7 +143,7 @@ def _make_spec(
     raw_case_dir = getattr(args, "case_dir", None)
     output_base_dir: Path | None = Path(raw_case_dir) if raw_case_dir else None
 
-    spec = EvalSpec(
+    spec = OracleGenConfig(
         artifact_id=args.artifact_id if args.artifact_id else Path(args.artifact_dir).name,
         artifact_dir=Path(args.artifact_dir),
         artifact_readme=Path(args.artifact_readme) if args.artifact_readme else None,
@@ -162,13 +161,7 @@ def _make_spec(
         feedback_path=Path(args.feedback_path) if args.feedback_path else None,
         verbose=args.verbose,
     )
-    return spec.resolved()
-
-
-def _artifact_plan_output_path(spec: EvalSpec) -> Path:
-    if spec.artifact_plan_path is not None:
-        return spec.artifact_plan_path
-    return spec.default_artifact_plan_path
+    return spec.resolve_paths()
 
 
 def _print_and_write_report(
@@ -179,7 +172,8 @@ def _print_and_write_report(
 
     if report_path_value:
         report_path = Path(report_path_value)
-        write_json_file(report_path, payload, indent=2, sort_keys=True)
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(text + "\n", "utf-8")
         logger.info("wrote report to %s", report_path)
 
     print(text, flush=True)
@@ -229,7 +223,7 @@ def _print_validation_report(stage_name: str, report: dict[str, Any]) -> None:
         print_warning(f"... and {remaining} more issue(s)")
 
 
-async def _run_extract(spec: EvalSpec) -> dict[str, Any]:
+async def _run_extract(spec: OracleGenConfig) -> dict[str, Any]:
     if spec.artifact_readme is None:
         raise ValueError("artifact_readme is required for extract")
 
@@ -242,7 +236,7 @@ async def _run_extract(spec: EvalSpec) -> dict[str, Any]:
         readme_path=readme_path,
     )
 
-    artifact_plan_path = _artifact_plan_output_path(spec)
+    artifact_plan_path = spec.artifact_plan_output_path
     write_json_file(artifact_plan_path, plan, indent=2, sort_keys=False)
 
     payload = {
@@ -253,118 +247,94 @@ async def _run_extract(spec: EvalSpec) -> dict[str, Any]:
     return payload
 
 
-def _run_validate_extract(spec: EvalSpec) -> dict[str, Any]:
+def _run_validate_extract(spec: OracleGenConfig) -> dict[str, Any]:
     print_stage_header("validation (extractor)", spec.artifact_id)
     print_info("validating extracted artifact plan")
 
-    artifact_plan_path = _artifact_plan_output_path(spec)
+    artifact_plan_path = spec.artifact_plan_output_path
     report = validate_artifact_plan(artifact_plan_path)
-    payload = validation_report_dict(report)
+    payload = report_to_dict(report)
     _print_validation_report("extractor", payload)
     return payload
 
 
-async def _run_extract_with_retries(
-    spec: EvalSpec,
+async def _run_with_retries(
+    spec: OracleGenConfig,
+    *,
+    stage_name: str,
+    run_fn,
+    validate_fn,
+    is_ok,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    original_feedback_path = spec.feedback_path
-    feedback_path = spec.artifact_dir / ".extract_feedback.json"
+    feedback_path = spec.artifact_dir / f".{stage_name}_feedback.json"
 
-    last_extract_payload: dict[str, Any] | None = None
-    last_plan_report: dict[str, Any] | None = None
+    last_payload: dict[str, Any] | None = None
+    last_report: dict[str, Any] | None = None
 
-    try:
-        for attempt in range(1, spec.max_repairs + 2):
-            if attempt == 1:
-                spec.feedback_path = original_feedback_path
-            else:
-                spec.feedback_path = feedback_path
+    for attempt in range(1, spec.max_repairs + 2):
+        trial_spec = dataclasses.replace(
+            spec,
+            feedback_path=feedback_path if attempt > 1 else spec.feedback_path,
+        )
 
-            logger.info("extract attempt %d", attempt)
-            if attempt > 1:
-                print_info(f"extract retry attempt {attempt}")
+        logger.info("%s attempt %d", stage_name, attempt)
+        if attempt > 1:
+            print_info(f"{stage_name} retry attempt {attempt}")
 
-            last_extract_payload = await _run_extract(spec)
-            last_plan_report = _run_validate_extract(spec)
+        last_payload = await run_fn(trial_spec)
+        last_report = validate_fn(spec)
 
-            if last_plan_report["ok"]:
-                return last_extract_payload, last_plan_report
+        if is_ok(last_payload, last_report):
+            return last_payload, last_report
 
-            if attempt <= spec.max_repairs:
-                _write_feedback_file(
-                    feedback_path,
-                    stage="extractor",
-                    attempt=attempt,
-                    report=last_plan_report,
-                )
+        if attempt <= spec.max_repairs:
+            _write_feedback_file(
+                feedback_path,
+                stage=stage_name,
+                attempt=attempt,
+                report=last_report,
+            )
 
-        assert last_extract_payload is not None
-        assert last_plan_report is not None
-        return last_extract_payload, last_plan_report
-    finally:
-        spec.feedback_path = original_feedback_path
+    assert last_payload is not None
+    assert last_report is not None
+    return last_payload, last_report
 
 
-def _run_validate_generate(spec: EvalSpec) -> dict[str, Any]:
+async def _run_extract_with_retries(spec: OracleGenConfig) -> tuple[dict[str, Any], dict[str, Any]]:
+    return await _run_with_retries(
+        spec,
+        stage_name="extract",
+        run_fn=_run_extract,
+        validate_fn=_run_validate_extract,
+        is_ok=lambda _payload, report: report["ok"],
+    )
+
+
+async def _run_generate_with_retries(spec: OracleGenConfig) -> tuple[dict[str, Any], dict[str, Any]]:
+    async def _generate_as_dict(config: OracleGenConfig) -> dict[str, Any]:
+        return dataclasses.asdict(await generate_oracles(config))
+
+    return await _run_with_retries(
+        spec,
+        stage_name="generate",
+        run_fn=_generate_as_dict,
+        validate_fn=_run_validate_generate,
+        is_ok=lambda payload, report: payload["success"] and report["ok"],
+    )
+
+
+def _run_validate_generate(spec: OracleGenConfig) -> dict[str, Any]:
     print_stage_header("validation (generator)", spec.artifact_id)
     print_info("validating generated oracle package")
 
     output_root = spec.output_dir.parent
-    create_missing_refs(output_root)
-    report = validate(output_root)
-    payload = validation_report_dict(report)
+    report = validate_oracle_package(output_root)
+    payload = report_to_dict(report)
     _print_validation_report("generator", payload)
     return payload
 
 
-async def _run_generate_with_retries(
-    spec: EvalSpec,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    original_feedback_path = spec.feedback_path
-    feedback_path = spec.artifact_dir / ".generate_feedback.json"
-
-    last_generate_payload: dict[str, Any] | None = None
-    last_oracle_report: dict[str, Any] | None = None
-
-    try:
-        for attempt in range(1, spec.max_repairs + 2):
-            if attempt == 1:
-                spec.feedback_path = original_feedback_path
-            else:
-                spec.feedback_path = feedback_path
-
-            logger.info("generate attempt %d", attempt)
-            if attempt > 1:
-                print_info(f"generate retry attempt {attempt}")
-
-            last_generate_payload = await _run_generate(spec)
-            last_oracle_report = _run_validate_generate(spec)
-
-            ok = bool(last_generate_payload["success"]) and bool(last_oracle_report["ok"])
-            if ok:
-                return last_generate_payload, last_oracle_report
-
-            if attempt <= spec.max_repairs:
-                _write_feedback_file(
-                    feedback_path,
-                    stage="generator",
-                    attempt=attempt,
-                    report=last_oracle_report,
-                )
-
-        assert last_generate_payload is not None
-        assert last_oracle_report is not None
-        return last_generate_payload, last_oracle_report
-    finally:
-        spec.feedback_path = original_feedback_path
-
-
-async def _run_generate(spec: EvalSpec) -> dict[str, Any]:
-    result = await generate_oracles(spec)
-    return dataclasses.asdict(result)
-
-
-def _run_validate(spec: EvalSpec, target: str) -> dict[str, Any]:
+def _run_validate(spec: OracleGenConfig, target: str) -> dict[str, Any]:
     payload: dict[str, Any] = {}
 
     if target in {"all", "plan"}:
@@ -377,7 +347,7 @@ def _run_validate(spec: EvalSpec, target: str) -> dict[str, Any]:
 
 
 def _run_build_case_bundle(
-    spec: EvalSpec,
+    spec: OracleGenConfig,
     *,
     case_dir: Path,
     upstream_url: str,
@@ -415,13 +385,13 @@ def _run_build_case_bundle(
 
 
 async def _run_pipeline(
-    spec: EvalSpec,
+    spec: OracleGenConfig,
     *,
     skip_validation: bool,
 ) -> dict[str, Any]:
     if skip_validation:
         extract_payload = await _run_extract(spec)
-        generate_payload = await _run_generate(spec)
+        generate_payload = dataclasses.asdict(await generate_oracles(spec))
 
         ok = bool(generate_payload["success"])
 
@@ -513,7 +483,7 @@ def main(argv: list[str] | None = None) -> int:
         print_info("running GENERATOR")
 
         if args.skip_validation:
-            generate_payload = asyncio.run(_run_generate(spec))
+            generate_payload = dataclasses.asdict(asyncio.run(generate_oracles(spec)))
             payload = {
                 "generate": generate_payload,
                 "validate": {

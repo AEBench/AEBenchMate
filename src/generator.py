@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,11 +9,11 @@ from typing import Any
 
 from claude_agent_sdk import ClaudeSDKClient
 
+from dataclasses import asdict
 from utils import (
-    EvalSpec,
+    OracleGenConfig,
     read_response,
     log_debug_json,
-    log_debug_spec,
     log_debug_text,
     read_json_if_exists,
     read_feedback_text,
@@ -40,7 +39,7 @@ logger = logging.getLogger("generator")
 class ArtifactPlan:
     artifact_plan_path: Path | None
     artifact_name: str
-    source_file: str
+    readme_path: str
     summary: str
     env_setup: tuple[dict[str, Any], ...]
     build_artifact: tuple[dict[str, Any], ...]
@@ -52,7 +51,7 @@ class ArtifactPlan:
         return cls(
             artifact_plan_path=None,
             artifact_name="",
-            source_file="",
+            readme_path="",
             summary="",
             env_setup=(),
             build_artifact=(),
@@ -69,19 +68,15 @@ class GenerationResult:
     cost_usd: float | None = None
 
 
-def run(spec: EvalSpec) -> GenerationResult:
-    return asyncio.run(generate(spec))
-
-
-async def generate(spec: EvalSpec) -> GenerationResult:
-    spec = spec.resolved()
-    _require_generator_inputs(spec)
+async def generate_oracles(spec: OracleGenConfig) -> GenerationResult:
+    spec = spec.resolve_paths()
+    _check_required_inputs(spec)
 
     artifact_plan = _load_artifact_plan(spec.artifact_plan_path)
     feedback_text = read_feedback_text(spec.feedback_path)
     output_dir = spec.output_dir
 
-    log_debug_spec(logger, spec)
+    log_debug_json(logger, "Resolved spec", asdict(spec))
     log_debug_json(
         logger,
         "Loaded artifact plan summary",
@@ -90,7 +85,7 @@ async def generate(spec: EvalSpec) -> GenerationResult:
             if artifact_plan.artifact_plan_path is not None
             else None,
             "artifact_name": artifact_plan.artifact_name,
-            "source_file": artifact_plan.source_file,
+            "readme_path": artifact_plan.readme_path,
             "summary": artifact_plan.summary,
             "env_setup": len(artifact_plan.env_setup),
             "build_artifact": len(artifact_plan.build_artifact),
@@ -150,9 +145,7 @@ async def generate(spec: EvalSpec) -> GenerationResult:
         await client.query(initial_prompt)
         text, cost_usd, usage = await read_response(
             client,
-            logger=logger,
-            verbose=spec.verbose,
-            line_fn=lambda line: print_agent_line(line, stage="generator"),
+            on_line=lambda line: print_agent_line(line, stage="generator"),
         )
 
         if text is not None:
@@ -194,7 +187,7 @@ async def generate(spec: EvalSpec) -> GenerationResult:
     )
 
 
-def _require_generator_inputs(spec: EvalSpec) -> None:
+def _check_required_inputs(spec: OracleGenConfig) -> None:
     if spec.artifact_readme is None:
         raise ValueError("artifact_readme is required for generator")
     if spec.howto_path is None:
@@ -204,7 +197,7 @@ def _require_generator_inputs(spec: EvalSpec) -> None:
 
 
 def _build_prompt(
-    spec: EvalSpec,
+    spec: OracleGenConfig,
     artifact_plan: ArtifactPlan,
     feedback_text: str | None,
 ) -> str:
@@ -240,28 +233,23 @@ def _build_prompt(
         ]
     )
 
+    step = 4
     if _count_plan_steps(artifact_plan) > 0:
-        lines.extend(
-            [
-                "4. Read the artifact evaluation plan and the compact plan summary below.",
-                "5. Use the artifact plan as the primary structured checklist.",
-                "6. Read the artifact README only after that, as fallback augmentation.",
-                "7. Do not proactively inspect artifact source code trees; only inspect named non-source files or paths when needed to confirm a planned step.",
-                "8. Write oracles/oracle_plan.json before or alongside code generation.",
-                "9. Generate the artifact-specific evaluator files.",
-                "10. Run a lightweight self-check: python -m py_compile oracles/env_setup.py oracles/artifact_build.py oracles/benchmark_prep.py oracles/experiment_runs.py.",
-            ]
-        )
+        lines.append(f"{step}. Read the artifact evaluation plan and the compact plan summary below.")
+        step += 1
+        lines.append(f"{step}. Use the artifact plan as the primary structured checklist.")
+        step += 1
+        lines.append(f"{step}. Read the artifact README only after that, as fallback augmentation.")
+        step += 1
     else:
-        lines.extend(
-            [
-                "4. Read the artifact README after that.",
-                "5. Do not proactively inspect artifact source code trees; only inspect named non-source files or paths when needed to confirm a planned step.",
-                "6. Write oracles/oracle_plan.json before or alongside code generation.",
-                "7. Generate the artifact-specific evaluator files.",
-                "8. Run a lightweight self-check: python -m py_compile oracles/env_setup.py oracles/artifact_build.py oracles/benchmark_prep.py oracles/experiment_runs.py.",
-            ]
-        )
+        lines.append(f"{step}. Read the artifact README after that.")
+        step += 1
+
+    lines.extend([
+        f"{step}. Write oracles/oracle_plan.json before or alongside code generation.",
+        f"{step + 1}. Generate the artifact-specific evaluator files.",
+        f"{step + 2}. Run a lightweight self-check: python -m py_compile oracles/env_setup.py oracles/artifact_build.py oracles/benchmark_prep.py oracles/experiment_runs.py.",
+    ])
 
     lines.extend(
         [
@@ -276,44 +264,28 @@ def _build_prompt(
             "- oracles/refs/*.json only when the checks actually need them",
             "",
             "oracle_plan.json must include:",
-            "- howto_rules",
-            "- example_patterns",
-            "- borrowed_structure",
-            "- artifact_specific_adaptations",
-            "- env_requirements",
-            "- build_steps",
-            "- benchmark_assets",
-            "- experiment_outputs",
-            "- reference_templates",
-            "- plan_summary",
-            "- step_coverage",
-            "- step_gaps",
-            "- step_augmentations",
+            "- howto_rules, example_patterns, borrowed_structure, artifact_specific_adaptations",
+            "- env_requirements, build_steps, benchmark_assets, experiment_outputs",
+            "- reference_templates, plan_summary, step_coverage, step_gaps, step_augmentations",
             "",
-            "Reference template rules:",
-            "- If exact reference values are unknown, preserve the expected schema and use typed placeholders.",
-            '- Use 0.0 for floats or doubles, 0 for ints, "" for strings, false for booleans, [] for lists, and {} for objects.',
-            "",
-            "Implementation rules:",
-            "- Follow INSTRUCTIONS.md conventions first.",
+            "Rules:",
+            "- Follow add_case.md conventions first.",
             "- Reuse code patterns from oracle_building_blocks/ whenever possible.",
             "- Reuse structure and style from oracle_examples/ where appropriate.",
-            "- Use the artifact evaluation plan as the primary source of artifact requirements when it is available.",
-            "- For every important oracle check, prefer to map it to one or more planned steps from the artifact plan.",
             "- Use the artifact evaluation plan and artifact README as the primary sources.",
             "- Do not proactively inspect artifact source code trees such as src/, lib/, internal/, pkg/, cmd/, app/, or similar directories.",
             "- Do not read artifact source code files to discover extra checks or requirements, unless there is significant ambiguity in the artifact README.",
             "- Only inspect repository files beyond the README when a planned step explicitly names a file, directory, manifest, command, or output path that must be confirmed.",
-            "- Prefer artifact_plan.json and the README over repository exploration.",
-            "- If you add a check based on README or repository evidence not present in the artifact evaluation plan, record it under step_augmentations in oracle_plan.json.",
+            "- If you add a check not present in the artifact evaluation plan, record it under step_augmentations in oracle_plan.json.",
             "- If a planned step cannot be operationalized into a check, record it under step_gaps in oracle_plan.json.",
             "- Prefer the existing evaluator base classes and primitives.",
             "- Keep checks objective, non-interactive, idempotent, and time-bounded.",
             "- Any use of subprocess.run, subprocess.check_call, or subprocess.check_output must include an explicit timeout=... argument.",
-            "- Before finishing, verify that no generated oracle contains an unbounded subprocess call.",
             "- Do not modify artifact source files.",
-            "- Keep writes inside oracles/ only (oracle_plan.json and oracle code go there; case.toml is assembled by the authoring pipeline after this stage).",
-            "- Use refs JSON files only when they are referenced by the checks.",
+            "- Keep writes inside oracles/ only.",
+            "- Use refs JSON files only when referenced by the checks.",
+            "- If exact reference values are unknown, preserve the schema and use typed placeholders.",
+            '- Use 0.0 for floats, 0 for ints, "" for strings, false for booleans, [] for lists, and {} for objects.',
             "",
         ]
     )
@@ -368,13 +340,13 @@ def _load_artifact_plan(path: Path | None) -> ArtifactPlan:
     experiment_runs = _load_stage_items(stages, "experiment_runs")
 
     artifact_name = str(payload.get("artifact_name", ""))
-    source_file = str(payload.get("source_file", ""))
+    readme_path = str(payload.get("source_file", ""))
     summary = str(payload.get("summary", ""))
 
     return ArtifactPlan(
         artifact_plan_path=path,
         artifact_name=artifact_name,
-        source_file=source_file,
+        readme_path=readme_path,
         summary=summary,
         env_setup=env_setup,
         build_artifact=build_artifact,
@@ -399,34 +371,34 @@ def _load_stage_items(
     return tuple(items)
 
 
-def _count_plan_steps(bundle: ArtifactPlan) -> int:
+def _count_plan_steps(plan: ArtifactPlan) -> int:
     return (
-        len(bundle.env_setup)
-        + len(bundle.build_artifact)
-        + len(bundle.benchmark_prep)
-        + len(bundle.experiment_runs)
+        len(plan.env_setup)
+        + len(plan.build_artifact)
+        + len(plan.benchmark_prep)
+        + len(plan.experiment_runs)
     )
 
 
-def _summarize_artifact_plan(bundle: ArtifactPlan) -> str:
+def _summarize_artifact_plan(plan: ArtifactPlan) -> str:
     lines: list[str] = []
 
-    if bundle.artifact_plan_path is not None:
-        lines.append(f"Use artifact plan from: {bundle.artifact_plan_path.as_posix()}")
-    if bundle.artifact_name:
-        lines.append(f"Artifact name: {bundle.artifact_name}")
-    if bundle.source_file:
-        lines.append(f"Plan source file: {bundle.source_file}")
-    if bundle.summary:
-        lines.append(f"Plan summary: {bundle.summary}")
+    if plan.artifact_plan_path is not None:
+        lines.append(f"Use artifact plan from: {plan.artifact_plan_path.as_posix()}")
+    if plan.artifact_name:
+        lines.append(f"Artifact name: {plan.artifact_name}")
+    if plan.readme_path:
+        lines.append(f"Plan source file: {plan.readme_path}")
+    if plan.summary:
+        lines.append(f"Plan summary: {plan.summary}")
 
     if lines:
         lines.append("")
 
-    _append_stage_summary(lines, "Environment setup steps", bundle.env_setup)
-    _append_stage_summary(lines, "Build artifact steps", bundle.build_artifact)
-    _append_stage_summary(lines, "Benchmark prep steps", bundle.benchmark_prep)
-    _append_stage_summary(lines, "Experiment run steps", bundle.experiment_runs)
+    _append_stage_summary(lines, "Environment setup steps", plan.env_setup)
+    _append_stage_summary(lines, "Build artifact steps", plan.build_artifact)
+    _append_stage_summary(lines, "Benchmark prep steps", plan.benchmark_prep)
+    _append_stage_summary(lines, "Experiment run steps", plan.experiment_runs)
 
     return "\n".join(lines).strip()
 
@@ -454,13 +426,13 @@ def _append_stage_summary(
 
 def _format_step_summary_line(step: dict[str, Any]) -> str:
     item_id = str(step.get("item_id", ""))
-    kind = str(step.get("kind", ""))
+    category = str(step.get("kind", ""))
     name = str(step.get("name", ""))
     requirement = str(step.get("requirement", ""))
     command = str(step.get("command", ""))
     notes = str(step.get("notes", ""))
 
-    parts: list[str] = [f"{kind}: {name}"]
+    parts: list[str] = [f"{category}: {name}"]
 
     if requirement:
         parts.append(f"requirement={requirement}")

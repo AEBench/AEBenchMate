@@ -17,7 +17,7 @@ def _make_bundle(**overrides) -> ArtifactPlan:
     defaults = dict(
         artifact_plan_path=None,
         artifact_name="",
-        source_file="",
+        readme_path="",
         summary="",
         env_setup=(),
         build_artifact=(),
@@ -44,7 +44,7 @@ def test_load_artifact_plan_valid(tmp_path: Path) -> None:
     b = _load_artifact_plan(plan_path)
     assert b.artifact_plan_path == plan_path
     assert b.artifact_name == "foo"
-    assert b.source_file == "bar.py"
+    assert b.readme_path == "bar.py"
     assert b.summary == "test summary"
     assert len(b.env_setup) == 1
     assert b.env_setup[0]["name"] == "a"

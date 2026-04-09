@@ -7,12 +7,12 @@ from typing import Any
 
 from claude_agent_sdk import ClaudeSDKClient
 
-from policies import planner_options
+from policies import extractor_options
+from dataclasses import asdict
 from utils import (
-    EvalSpec,
+    OracleGenConfig,
     read_response,
     log_debug_json,
-    log_debug_spec,
     log_debug_stage_counts,
     log_debug_text,
     strip_code_fences,
@@ -44,7 +44,7 @@ _STAGE_PREFIX = {
     "experiment_runs": "run",
 }
 
-_ALLOWED_KINDS = (
+_ALLOWED_CATEGORIES = (
     "dependency",
     "env_var",
     "service",
@@ -59,7 +59,7 @@ _ALLOWED_KINDS = (
 )
 
 
-def _plan_prompt(
+def _extraction_prompt(
     readme_text: str,
     readme_path: str,
     feedback_text: str | None = None,
@@ -88,7 +88,7 @@ def _plan_prompt(
         '  "expected_outputs": ["string"],\n'
         '  "notes": "string"\n'
         "}\n\n"
-        f"Allowed kind values: {', '.join(_ALLOWED_KINDS)}.\n"
+        f"Allowed kind values: {', '.join(_ALLOWED_CATEGORIES)}.\n"
         "Use empty strings for unknown text fields.\n"
         "Use [] for unknown expected_outputs.\n"
         "If a stage is not described, return an empty list for that stage.\n"
@@ -108,15 +108,13 @@ def _plan_prompt(
     return prompt
 
 
-async def _query_model(spec: EvalSpec, prompt: str) -> tuple[str, float | None]:
-    options = planner_options(spec)
+async def _call_extractor(spec: OracleGenConfig, prompt: str) -> tuple[str, float | None]:
+    options = extractor_options(spec)
     async with ClaudeSDKClient(options=options) as client:
         await client.query(prompt)
         return await read_response(
                         client,
-                        logger=logger,
-                        verbose=spec.verbose,
-                        line_fn=lambda line: print_agent_line(line, stage="extractor"),
+                        on_line=lambda line: print_agent_line(line, stage="extractor"),
                     )
 
 
@@ -145,18 +143,18 @@ def _make_empty_plan(readme_path: str) -> dict[str, Any]:
     }
 
 
-def _str_field(d: dict[str, Any], key: str) -> str:
-    val = d.get(key)
-    return "" if val is None else str(val).strip()
+def _get_str(item: dict[str, Any], key: str) -> str:
+    value = item.get(key)
+    return "" if value is None else str(value).strip()
 
 
-def _clean_item(raw_item: Any) -> dict[str, Any] | None:
+def _normalize_item(raw_item: Any) -> dict[str, Any] | None:
     if not isinstance(raw_item, dict):
         return None
 
-    kind = _str_field(raw_item, "kind")
-    name = _str_field(raw_item, "name")
-    if not kind or not name:
+    category = _get_str(raw_item, "kind")
+    name = _get_str(raw_item, "name")
+    if not category or not name:
         return None
 
     raw_outputs = raw_item.get("expected_outputs", [])
@@ -169,24 +167,24 @@ def _clean_item(raw_item: Any) -> dict[str, Any] | None:
 
     return {
         "item_id": "",
-        "kind": kind,
+        "kind": category,
         "name": name,
-        "requirement": _str_field(raw_item, "requirement"),
-        "command": _str_field(raw_item, "command"),
+        "requirement": _get_str(raw_item, "requirement"),
+        "command": _get_str(raw_item, "command"),
         "expected_outputs": expected_outputs,
-        "notes": _str_field(raw_item, "notes"),
+        "notes": _get_str(raw_item, "notes"),
     }
 
 
-def _clean_stage(raw_items: Any) -> list[dict[str, Any]]:
+def _normalize_stage(raw_items: Any) -> list[dict[str, Any]]:
     if not isinstance(raw_items, list):
         return []
 
     items: list[dict[str, Any]] = []
     for raw_item in raw_items:
-        normalized_item = _clean_item(raw_item)
-        if normalized_item is not None:
-            items.append(normalized_item)
+        normalized = _normalize_item(raw_item)
+        if normalized is not None:
+            items.append(normalized)
 
     return items
 
@@ -198,12 +196,12 @@ def _assign_item_ids(plan: dict[str, Any]) -> None:
             item["item_id"] = f"{prefix}-{index:03d}"
 
 
-def _clean_plan(payload: dict[str, Any], *, readme_path: str) -> dict[str, Any]:
+def _normalize_plan(payload: dict[str, Any], *, readme_path: str) -> dict[str, Any]:
     plan = _make_empty_plan(readme_path)
 
-    artifact_name = _str_field(payload, "artifact_name")
-    source_file = _str_field(payload, "source_file")
-    summary = _str_field(payload, "summary")
+    artifact_name = _get_str(payload, "artifact_name")
+    source_file = _get_str(payload, "source_file")
+    summary = _get_str(payload, "summary")
 
     plan["artifact_name"] = artifact_name
     if source_file:
@@ -216,20 +214,20 @@ def _clean_plan(payload: dict[str, Any], *, readme_path: str) -> dict[str, Any]:
 
     for stage_name in STAGES:
         raw_items = raw_stages.get(stage_name, [])
-        plan["stages"][stage_name] = _clean_stage(raw_items)
+        plan["stages"][stage_name] = _normalize_stage(raw_items)
 
     _assign_item_ids(plan)
     return plan
 
 
 async def extract_artifact_plan(
-    spec: EvalSpec,
+    spec: OracleGenConfig,
     readme_text: str,
     readme_path: str = "README.md",
 ) -> tuple[dict[str, Any], list[str]]:
     """Parse README into a normalized artifact plan via one model call."""
-    spec = spec.resolved()
-    log_debug_spec(logger, spec)
+    spec = spec.resolve_paths()
+    log_debug_json(logger, "Resolved spec", asdict(spec))
     warnings: list[str] = []
 
     logger.info(
@@ -256,7 +254,7 @@ async def extract_artifact_plan(
         return _make_empty_plan(readme_path), warnings
 
     feedback_text = read_feedback_text(spec.feedback_path)
-    prompt = _plan_prompt(
+    prompt = _extraction_prompt(
         readme_text,
         readme_path,
         feedback_text=feedback_text,
@@ -268,7 +266,7 @@ async def extract_artifact_plan(
         len(prompt),
         len(prompt.encode("utf-8")),
     )
-    text, cost_usd, usage = await _query_model(spec, prompt)
+    text, cost_usd, usage = await _call_extractor(spec, prompt)
 
     if usage is not None:
         logger.info(
@@ -301,7 +299,7 @@ async def extract_artifact_plan(
 
     log_debug_json(logger, "Parsed planner payload", payload, max_chars=4000)
 
-    plan = _clean_plan(
+    plan = _normalize_plan(
         payload,
         readme_path=readme_path,
     )

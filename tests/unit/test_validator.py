@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from validator import validate, validate_artifact_plan
+from validator import validate_oracle_package, validate_artifact_plan
 
 
 
@@ -66,7 +66,7 @@ def _setup_valid_plan(root: Path) -> None:
 
 def test_validate_valid_package(tmp_path: Path) -> None:
     _setup_valid_package(tmp_path)
-    report = validate(tmp_path)
+    report = validate_oracle_package(tmp_path)
     assert report.ok
     assert all(i.severity != "error" for i in report.issues)
 
@@ -75,7 +75,7 @@ def test_validate_valid_package(tmp_path: Path) -> None:
 def test_validate_missing_oracle_file(tmp_path: Path) -> None:
     _setup_valid_package(tmp_path)
     (tmp_path / "oracles" / "env_setup.py").unlink()
-    report = validate(tmp_path)
+    report = validate_oracle_package(tmp_path)
     assert not report.ok
     codes = [i.code for i in report.issues]
     assert "missing_file" in codes
@@ -83,7 +83,7 @@ def test_validate_missing_oracle_file(tmp_path: Path) -> None:
 
 def test_validate_empty_oracles(tmp_path: Path) -> None:
     (tmp_path / "oracles").mkdir()
-    report = validate(tmp_path)
+    report = validate_oracle_package(tmp_path)
     assert not report.ok
     assert sum(1 for i in report.issues if i.code == "missing_file") == 4
 
@@ -92,7 +92,7 @@ def test_validate_empty_oracles(tmp_path: Path) -> None:
 def test_validate_compile_error(tmp_path: Path) -> None:
     _setup_valid_package(tmp_path)
     (tmp_path / "oracles" / "env_setup.py").write_text("def broken(\n", encoding="utf-8")
-    report = validate(tmp_path)
+    report = validate_oracle_package(tmp_path)
     assert not report.ok
     assert any(i.code == "compile_error" for i in report.issues)
 
@@ -100,7 +100,7 @@ def test_validate_compile_error(tmp_path: Path) -> None:
 def test_validate_missing_class(tmp_path: Path) -> None:
     _setup_valid_package(tmp_path)
     _write(tmp_path / "oracles" / "env_setup.py", "class WrongName: pass\n")
-    report = validate(tmp_path)
+    report = validate_oracle_package(tmp_path)
     assert not report.ok
     assert any(i.code == "missing_class" for i in report.issues)
 
@@ -109,7 +109,7 @@ def test_validate_forbidden_call(tmp_path: Path) -> None:
     _setup_valid_package(tmp_path)
     p = tmp_path / "oracles" / "env_setup.py"
     p.write_text(p.read_text() + "\nx = input('hi')\n")
-    report = validate(tmp_path)
+    report = validate_oracle_package(tmp_path)
     assert any(i.code == "forbidden_call" for i in report.issues)
 
 
@@ -117,7 +117,7 @@ def test_validate_forbidden_popen(tmp_path: Path) -> None:
     _setup_valid_package(tmp_path)
     p = tmp_path / "oracles" / "env_setup.py"
     p.write_text(p.read_text() + "\nimport subprocess\nsubprocess.Popen(['ls'])\n")
-    report = validate(tmp_path)
+    report = validate_oracle_package(tmp_path)
     assert any(i.code == "forbidden_popen" for i in report.issues)
 
 
@@ -125,7 +125,7 @@ def test_validate_hardcoded_path_warning(tmp_path: Path) -> None:
     _setup_valid_package(tmp_path)
     p = tmp_path / "oracles" / "env_setup.py"
     p.write_text(p.read_text() + "\npath = '/home/someuser/data'\n")
-    report = validate(tmp_path)
+    report = validate_oracle_package(tmp_path)
     assert any(i.code == "hardcoded_path" for i in report.issues)
     assert all(i.severity != "error" for i in report.issues)
 
@@ -134,7 +134,7 @@ def test_validate_hardcoded_path_warning(tmp_path: Path) -> None:
 def test_validate_missing_oracle_plan_is_warning(tmp_path: Path) -> None:
     _setup_valid_package(tmp_path)
     (tmp_path / "oracles" / "oracle_plan.json").unlink()
-    report = validate(tmp_path)
+    report = validate_oracle_package(tmp_path)
     assert report.ok  # warning, not error
     assert any(i.code == "missing_plan" for i in report.issues)
 
