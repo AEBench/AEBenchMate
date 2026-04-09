@@ -14,10 +14,9 @@ from policies import (
     _is_secret_path,
 )
 
+claude_agent_sdk = pytest.importorskip("claude_agent_sdk")
 from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
 
-
-# -- _is_likely_source_code_dir ------------------------------------------------
 
 _ROOT = Path("/project")
 
@@ -35,8 +34,6 @@ def test_source_code_dir_allowed(path: Path) -> None:
     assert not _is_likely_source_code_dir(_ROOT, path)
 
 
-# -- _is_secret_path -----------------------------------------------------------
-
 @pytest.mark.parametrize("subpath", [".env", ".env.local", "config/.env.prod"])
 def test_secret_path(subpath: str) -> None:
     assert _is_secret_path(_ROOT, _ROOT / subpath)
@@ -47,8 +44,6 @@ def test_not_secret_path(subpath: str) -> None:
     assert not _is_secret_path(_ROOT, _ROOT / subpath)
 
 
-# -- _extract_tool_path --------------------------------------------------------
-
 @pytest.mark.parametrize("data, expected", [
     ({"file_path": "/foo/bar.py"}, "/foo/bar.py"),
     ({"path": "/foo/dir"}, "/foo/dir"),
@@ -58,8 +53,6 @@ def test_not_secret_path(subpath: str) -> None:
 def test_extract_tool_path(data: dict, expected: str | None) -> None:
     assert _extract_tool_path(data) == expected
 
-
-# -- _check_bash_permission ----------------------------------------------------
 
 def test_bash_normal_allowed() -> None:
     assert isinstance(_check_bash_permission({"command": "ls -la"}), PermissionResultAllow)
@@ -83,8 +76,6 @@ def test_bash_dangerous_denied(command: str) -> None:
 def test_bash_invalid_denied(input_data: dict) -> None:
     assert isinstance(_check_bash_permission(input_data), PermissionResultDeny)
 
-
-# -- _check_write_permission / _check_read_permission --------------------------
 
 _FIXTURE = dict(
     artifact_dir=Path("/project"),

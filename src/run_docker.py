@@ -42,7 +42,7 @@ _GUIDANCE_DIR = Path("/workspace/guidance")
 _RUNNER_DIR = Path("/workspace/runner")
 _OUTPUT_DIR = Path("/workspace/output")
 
-# Safety net: kill docker exec if container stalls without producing output.
+# Kill docker process if container hangs for more than these many seconds
 _DOCKER_EXEC_TIMEOUT_S: float = 6 * 3600
 
 
@@ -484,7 +484,7 @@ def run_stage_in_container(
         )
         assert proc.stdout is not None
 
-        # Kill the process after the timeout so this never hangs indefinitely.
+        # Kill process after timeout so this never hangs indefinitely
         def _timeout_kill() -> None:
             logger.warning("docker exec timed out after %.0fs -- killing", _DOCKER_EXEC_TIMEOUT_S)
             proc.kill()

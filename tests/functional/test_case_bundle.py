@@ -8,7 +8,7 @@ import pytest
 try:
     import tomllib
 except ModuleNotFoundError:
-    import tomli as tomllib  # type: ignore[no-redef]
+    import tomli as tomllib # sometimes gets redefinition error
 
 from case_builder import write_case_toml, build_case_bundle
 

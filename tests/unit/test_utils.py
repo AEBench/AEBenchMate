@@ -19,8 +19,6 @@ from utils import (
 )
 
 
-# -- OracleGenConfig properties and resolution ----------------------------------------
-
 def test_spec_output_dir_default(tmp_path: Path) -> None:
     spec = OracleGenConfig(artifact_id="x", artifact_dir=tmp_path)
     assert spec.output_dir == tmp_path / "oracles"
@@ -68,8 +66,6 @@ def test_spec_resolved_example_oracle_dirs(tmp_path: Path) -> None:
     assert all(p.is_absolute() for p in spec.resolve_paths().example_oracle_dirs)
 
 
-# -- Budget tracking -----------------------------------------------------------
-
 def test_over_budget(tmp_path: Path) -> None:
     spec = OracleGenConfig(artifact_id="x", artifact_dir=tmp_path, max_budget_usd=1.0)
     spec.cost_usd = 0.5
@@ -87,8 +83,6 @@ def test_add_cost_accumulates_and_ignores_none(tmp_path: Path) -> None:
     assert abs(spec.cost_usd - 0.8) < 1e-9
 
 
-# -- strip_code_fences --------------------------------------------------------
-
 @pytest.mark.parametrize("text, expected", [
     ('```json\n{"key": 1}\n```', '{"key": 1}'),
     ('{"key": 1}', '{"key": 1}'),
@@ -98,8 +92,6 @@ def test_add_cost_accumulates_and_ignores_none(tmp_path: Path) -> None:
 def test_strip_code_fences(text: str, expected: str) -> None:
     assert strip_code_fences(text) == expected
 
-
-# -- load_guidance_root --------------------------------------------------------
 
 def test_load_guidance_root_missing_or_empty(tmp_path: Path) -> None:
     assert load_guidance_root(tmp_path) is None
@@ -113,8 +105,6 @@ def test_load_guidance_root_resolves_relative(tmp_path: Path) -> None:
     assert result == (tmp_path / "sub" / "dir").resolve()
     assert result.is_absolute()
 
-
-# -- load_env_file -------------------------------------------------------------
 
 def test_load_env_parses_values(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     env_file = tmp_path / ".env"
@@ -141,8 +131,6 @@ def test_load_env_missing_file(tmp_path: Path) -> None:
     load_env_file(tmp_path / "nonexistent.env")
 
 
-# -- resolve_log_file ----------------------------------------------------------
-
 @pytest.mark.parametrize("value, expected_none", [
     (None, True),
     ("", True),
@@ -158,8 +146,6 @@ def test_resolve_log_file_absolute() -> None:
 def test_resolve_log_file_relative() -> None:
     assert resolve_log_file(Path("/base"), "logs/app.log") == Path("/base/logs/app.log").resolve()
 
-
-# -- read/write JSON and text --------------------------------------------------
 
 def test_read_text_if_exists(tmp_path: Path) -> None:
     assert read_text_if_exists(tmp_path / "nope.txt") is None
