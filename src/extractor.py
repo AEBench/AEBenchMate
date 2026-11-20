@@ -5,13 +5,10 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from claude_agent_sdk import ClaudeSDKClient
-
-from policies import extractor_options
+from agents import run_agent
 from dataclasses import asdict
 from utils import (
     OracleGenConfig,
-    read_response,
     log_debug_json,
     log_debug_stage_counts,
     log_debug_text,
@@ -108,14 +105,15 @@ def _extraction_prompt(
     return prompt
 
 
-async def _call_extractor(spec: OracleGenConfig, prompt: str) -> tuple[str, float | None]:
-    options = extractor_options(spec)
-    async with ClaudeSDKClient(options=options) as client:
-        await client.query(prompt)
-        return await read_response(
-                        client,
-                        on_line=lambda line: print_agent_line(line, stage="extractor"),
-                    )
+async def _call_extractor(
+    spec: OracleGenConfig, prompt: str
+) -> tuple[str, float | None, dict[str, Any] | None]:
+    return await run_agent(
+        spec,
+        prompt,
+        stage="extract",
+        on_line=lambda line: print_agent_line(line, stage="extractor"),
+    )
 
 
 def _parse_plan_json(text: str) -> dict[str, Any]:

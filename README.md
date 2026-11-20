@@ -190,3 +190,48 @@ The generator writes oracle code but does not execute it. Validation checks synt
 ### 9.3 Read-only artifact directories in Docker
 
 Retry feedback is written to the artifact directory by default. In AEBench-integrated Docker runs where the artifact checkout is mounted read-only, retries may fail. Use `--case-dir` to route outputs to a writable location.
+
+
+## 10. Selecting and adding agents
+
+Claude remains the default and uses the same Claude Agent SDK and policies as
+before. Select an adapter with `--agent NAME` on `extract`, `generate`, or
+`pipeline`; Docker's wrapper accepts the same option. Existing commands need
+no changes.
+
+The directory-per-agent idea comes from AEBench PR 155. Mate uses a small Python
+entry point instead of importing AEBench's runtime or replacing its Claude SDK:
+
+```text
+agents/claude/agent.py
+agents/<new-agent>/agent.py
+```
+
+Each adapter defines the host environment variables it needs in `ENV_VARS`
+(use `()` when none are required), and this async entry point:
+
+```python
+ENV_VARS = ("MY_AGENT_API_KEY",)
+
+async def run(spec, prompt, *, stage, on_line):
+    # Invoke your agent's SDK or CLI with the supplied task and settings.
+    # Return (response_text, cost_usd_or_None, usage_dict_or_None).
+    raise NotImplementedError("Implement the provider-specific call here")
+```
+
+`stage` is `"extract"` or `"generate"`. Extraction returns the requested artifact
+plan JSON as response text. Generation writes the oracle files to
+`spec.output_dir` and returns a summary. `spec` also supplies the model, paths,
+turn limit, budget, and effort; `on_line(text)` displays optional progress.
+Raise an exception if agent execution fails. The adapter implements its agent's
+authentication, tools, and stage restrictions: extraction uses only the supplied
+README, and generation must not modify artifact source files. Claude's adapter
+reuses the existing `policies.py` settings and permission handler. Other adapters
+must configure equivalent behavior through their own SDK or CLI; prompts alone
+are not permission enforcement.
+
+For local runs, configure credentials in the host environment or Mate's `.env`
+as before. Docker forwards the selected adapter's declared environment variables
+by name and copies the `agents/` directory into the container. Install any new
+agent's required packages or executable in the environment/image where it runs.
+No registry entry, manifest, or new framework dependency is required.

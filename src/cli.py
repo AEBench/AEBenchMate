@@ -56,6 +56,7 @@ def _add_shared_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--oracle-examples-dir",
                         help="Path to example oracle cases.")
     parser.add_argument("--output-dir-name", default="oracles")
+    parser.add_argument("--agent", default="claude", help="Agent adapter under agents/<name>/.")
     parser.add_argument("--max-turns", type=int, default=80)
     parser.add_argument("--max-repairs", type=int, default=2)
     parser.add_argument("--max-budget-usd", type=float, default=1.0)
@@ -160,6 +161,7 @@ def _make_spec(
         effort=args.effort,
         feedback_path=Path(args.feedback_path) if args.feedback_path else None,
         verbose=args.verbose,
+        agent=args.agent,
     )
     return spec.resolve_paths()
 

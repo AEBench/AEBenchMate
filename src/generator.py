@@ -7,22 +7,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from claude_agent_sdk import ClaudeSDKClient
+from agents import run_agent
 
 from dataclasses import asdict
 from utils import (
     OracleGenConfig,
-    read_response,
     log_debug_json,
     log_debug_text,
     read_json_if_exists,
     read_feedback_text,
 )
 
-from policies import (
-    generator_options,
-    write_policy_files,
-)
 from dashboard import (
     print_agent_line,
     print_cost,
@@ -74,7 +69,6 @@ async def generate_oracles(spec: OracleGenConfig) -> GenerationResult:
 
     artifact_plan = _load_artifact_plan(spec.artifact_plan_path)
     feedback_text = read_feedback_text(spec.feedback_path)
-    output_dir = spec.output_dir
 
     log_debug_json(logger, "Resolved spec", asdict(spec))
     log_debug_json(
@@ -98,17 +92,6 @@ async def generate_oracles(spec: OracleGenConfig) -> GenerationResult:
     print_stage_header("generator", spec.artifact_id)
     print_info("starting oracle generation")
 
-    write_policy_files(
-        artifact_dir=spec.artifact_dir,
-        output_dir=output_dir,
-        artifact_readme=spec.artifact_readme,
-        howto_path=spec.howto_path,
-        artifact_plan_path=artifact_plan.artifact_plan_path,
-        primitives_dir=spec.primitives_dir,
-        examples_dir=spec.examples_dir,
-        output_base_dir=spec.output_base_dir,
-    )
-
     if spec.over_budget:
         logger.warning(
             "budget limit reached before generation cost_usd=%.4f limit_usd=%.4f",
@@ -130,47 +113,46 @@ async def generate_oracles(spec: OracleGenConfig) -> GenerationResult:
             cost_usd=spec.cost_usd,
         )
 
-    options = generator_options(spec, output_dir, output_base_dir=spec.output_base_dir)
     transcript_parts: list[str] = []
 
-    async with ClaudeSDKClient(options=options) as client:
-        initial_prompt = _build_prompt(spec, artifact_plan, feedback_text)
-        log_debug_text(logger, "Initial generator prompt", initial_prompt, max_chars=5000)
+    initial_prompt = _build_prompt(spec, artifact_plan, feedback_text)
+    log_debug_text(logger, "Initial generator prompt", initial_prompt, max_chars=5000)
+    logger.info(
+        "generator prompt size: chars=%d bytes=%d",
+        len(initial_prompt),
+        len(initial_prompt.encode("utf-8")),
+    )
+
+    text, cost_usd, usage = await run_agent(
+        spec,
+        initial_prompt,
+        stage="generate",
+        on_line=lambda line: print_agent_line(line, stage="generator"),
+    )
+
+    if text is not None:
+        transcript_parts.append(text)
+    if usage is not None:
         logger.info(
-            "generator prompt size: chars=%d bytes=%d",
-            len(initial_prompt),
-            len(initial_prompt.encode("utf-8")),
+            "generator tokens: input=%s output=%s cache_create=%s cache_read=%s",
+            usage.get("input_tokens"),
+            usage.get("output_tokens"),
+            usage.get("cache_creation_input_tokens"),
+            usage.get("cache_read_input_tokens"),
         )
 
-        await client.query(initial_prompt)
-        text, cost_usd, usage = await read_response(
-            client,
-            on_line=lambda line: print_agent_line(line, stage="generator"),
+    spec.add_cost(cost_usd)
+    print_cost(cost_usd, spec.cost_usd)
+
+    log_debug_text(logger, "Generator response", text, max_chars=4000)
+    if cost_usd is None:
+        logger.info("session_cost_usd unavailable cost_usd=%.6f", spec.cost_usd)
+    else:
+        logger.info(
+            "session_cost_usd=%.6f accumulated_spent_usd=%.6f",
+            cost_usd,
+            spec.cost_usd,
         )
-
-        if text is not None:
-            transcript_parts.append(text)
-        if usage is not None:
-            logger.info(
-                "generator tokens: input=%s output=%s cache_create=%s cache_read=%s",
-                usage.get("input_tokens"),
-                usage.get("output_tokens"),
-                usage.get("cache_creation_input_tokens"),
-                usage.get("cache_read_input_tokens"),
-            )
-
-        spec.add_cost(cost_usd)
-        print_cost(cost_usd, spec.cost_usd)
-
-        log_debug_text(logger, "Generator response", text, max_chars=4000)
-        if cost_usd is None:
-            logger.info("session_cost_usd unavailable cost_usd=%.6f", spec.cost_usd)
-        else:
-            logger.info(
-                "session_cost_usd=%.6f accumulated_spent_usd=%.6f",
-                cost_usd,
-                spec.cost_usd,
-            )
 
     generation_ok = not spec.over_budget
 

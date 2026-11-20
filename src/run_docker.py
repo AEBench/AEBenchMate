@@ -16,6 +16,7 @@ from pathlib import Path
 
 import logging
 
+from agents import load_agent
 from utils import (
     OracleGenConfig,
     configure_logging,
@@ -305,8 +306,9 @@ def validate_spec(spec: DockerRunConfig) -> None:
         raise ValueError(f"Unsupported stage: {spec.stage}")
 
     if spec.stage in {"pipeline", "extract", "generate"}:
-        if "ANTHROPIC_API_KEY" not in os.environ:
-            raise OSError("ANTHROPIC_API_KEY is not set in the host environment.")
+        for name in load_agent(spec.eval_spec.agent).ENV_VARS:
+            if not os.environ.get(name):
+                raise OSError(f"{name} is not set in the host environment.")
 
     if spec.stage in {"pipeline", "extract", "generate"} and spec.eval_spec.artifact_readme is None:
         raise ValueError("artifact_readme is required for this stage")
@@ -374,6 +376,7 @@ def prepare_container_dirs(spec: DockerRunConfig, container_name: str) -> None:
         (_GUIDANCE_DIR / "examples").as_posix(),
         _RUNNER_DIR.as_posix(),
         (_RUNNER_DIR / "src").as_posix(),
+        (_RUNNER_DIR / "agents").as_posix(),
         _OUTPUT_DIR.as_posix(),
     ]
 
@@ -427,6 +430,7 @@ def copy_inputs(spec: DockerRunConfig, container_name: str) -> None:
         dest = _GUIDANCE_DIR / "examples" / path.parent.name / "oracles"
         cp_dir(path, f"{container_name}:{dest.as_posix()}")
 
+    cp_dir(root / "agents", f"{container_name}:{(_RUNNER_DIR / 'agents').as_posix()}")
     cp_dir(root / "src", f"{container_name}:{(_RUNNER_DIR / 'src').as_posix()}")
     cp_file(root / "pyproject.toml", f"{container_name}:{(_RUNNER_DIR / 'pyproject.toml').as_posix()}")
 
@@ -457,8 +461,9 @@ def run_stage_in_container(
         "-e",
         "PYTHONUNBUFFERED=1",
     ]
-    if "ANTHROPIC_API_KEY" in os.environ:
-        docker_cmd.extend(["-e", f"ANTHROPIC_API_KEY={os.environ['ANTHROPIC_API_KEY']}"])
+    if spec.stage != "validate":
+        for name in load_agent(spec.eval_spec.agent).ENV_VARS:
+            docker_cmd.extend(["-e", name])
 
     docker_cmd.extend(
         [
@@ -538,6 +543,7 @@ def build_container_cli_argv(spec: DockerRunConfig) -> list[str]:
         str(spec.eval_spec.effort),
     ]
 
+    argv.extend(["--agent", spec.eval_spec.agent])
     if spec.eval_spec.model:
         argv.extend(["--model", spec.eval_spec.model])
 
@@ -727,6 +733,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default="bastoica/ae-agent-ubuntu24.04:latest",
     )
     parser.add_argument("--docker-bin", default="docker")
+    parser.add_argument("--agent", default="claude")
     parser.add_argument("--model")
     parser.add_argument(
         "--effort",
@@ -795,9 +802,10 @@ def spec_from_args(args: argparse.Namespace) -> DockerRunConfig:
             if args.max_budget_usd is not None
             else float(os.environ.get("ARTIFACT_EVAL_MAX_BUDGET_USD", "1.0"))
         ),
-        model=args.model or os.environ.get("ANTHROPIC_MODEL"),
+        model=args.model or (os.environ.get("ANTHROPIC_MODEL") if args.agent == "claude" else None),
         effort=args.effort or os.environ.get("ARTIFACT_EVAL_EFFORT", "medium"),
         verbose=args.verbose,
+        agent=args.agent,
     )
 
     artifact_id = args.artifact_id or workspace_dir.name
