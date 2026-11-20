@@ -97,3 +97,29 @@ def test_validate_spec_missing_api_key(tmp_path: Path, monkeypatch: pytest.Monke
     spec = resolve_spec(_make_spec(tmp_path, stage="extract"))
     with pytest.raises(OSError, match="ANTHROPIC_API_KEY"):
         validate_spec(spec)
+
+
+def test_docker_uses_selected_adapter_credentials(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import run_docker
+
+    spec = resolve_spec(_make_spec(tmp_path, stage="extract"))
+    spec.eval_spec.agent = "other"
+    monkeypatch.setattr(run_docker, "load_agent", lambda name: SimpleNamespace(ENV_VARS=("OTHER_KEY",)))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("OTHER_KEY", "test-credential")
+    validate_spec(spec)
+    argv = run_docker.build_container_cli_argv(spec)
+    assert argv[argv.index("--agent") + 1] == "other"
+    commands = []
+
+    def start(command, **kwargs):
+        commands.append(command)
+        return SimpleNamespace(stdout=iter(()), wait=lambda: 0, kill=lambda: None)
+
+    monkeypatch.setattr(run_docker.subprocess, "Popen", start)
+    monkeypatch.setattr(run_docker, "try_docker_cp_from_container", lambda *args: True)
+    assert run_docker.run_stage_in_container(spec, "container", tmp_path / "run.log", tmp_path / "report.json") == 0
+    assert "OTHER_KEY" in commands[0]
+    assert "test-credential" not in repr(commands[0])
+    assert "ANTHROPIC_API_KEY" not in repr(commands[0])

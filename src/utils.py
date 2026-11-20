@@ -52,6 +52,7 @@ class OracleGenConfig:
     feedback_path: Path | None = None
     verbose: bool = False
     cost_usd: float = 0.0
+    agent: str = "claude"
 
     def resolve_paths(self) -> "OracleGenConfig":
         self.artifact_dir = self.artifact_dir.resolve()
